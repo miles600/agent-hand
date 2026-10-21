@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { WebSocket, WebSocketServer } from 'ws';
 import { homeDir } from './config.js';
 import type { Hand } from './client.js';
+import { DirectSession } from './direct.js';
 import { materializeScreenshot } from './screenshot.js';
 import { sleep } from '../shared/sleep.js';
 import { normalizeCall } from '../shared/validate.js';
@@ -44,6 +45,7 @@ export async function startBridge(options: BridgeOptions): Promise<BridgeHandle>
   let extensionId = '';
   const pending = new Map<string, Waiter>();
   let chain: Promise<void> = Promise.resolve();
+  let direct: DirectSession | null = null;
 
   const httpServer = createServer((req, res) => {
     void handleHttp(req, res, {
@@ -51,6 +53,8 @@ export async function startBridge(options: BridgeOptions): Promise<BridgeHandle>
       port: addressPort(),
       extensionConnected: () => extension?.readyState === WebSocket.OPEN,
       extensionId: () => extensionId,
+      mode: () => (direct ? 'cdp' : 'extension'),
+      cdp: () => (direct ? String(direct.status().url ?? '') : ''),
     });
   });
 
@@ -197,6 +201,31 @@ export async function startBridge(options: BridgeOptions): Promise<BridgeHandle>
       await sleep(params.ms as number);
       return { ms: params.ms };
     }
+    if (method === 'attach_cdp') {
+      const url = String(params.url ?? '');
+      if (direct && direct.status().url === url) return direct.status();
+      if (direct) {
+        const previous = direct;
+        direct = null;
+        await previous.detach();
+      }
+      direct = await DirectSession.attach(url);
+      return direct.status();
+    }
+    if (method === 'detach_cdp') {
+      if (direct) {
+        await direct.detach();
+        direct = null;
+      }
+      return { attached: false, mode: 'extension' };
+    }
+    if (direct && DIRECT_METHODS.has(method)) {
+      const data = await direct.call(method, params);
+      if (method === 'screenshot') {
+        return materializeScreenshot(data, { out: typeof params.out === 'string' ? params.out : undefined, dir: screenshotDir });
+      }
+      return data;
+    }
     const data = await forward(method, params, timeoutMs);
     if (method === 'screenshot') {
       return materializeScreenshot(data, { out: typeof params.out === 'string' ? params.out : undefined, dir: screenshotDir });
@@ -222,6 +251,11 @@ export async function startBridge(options: BridgeOptions): Promise<BridgeHandle>
 
   async function close(): Promise<void> {
     clearInterval(pingTimer);
+    if (direct) {
+      const session = direct;
+      direct = null;
+      await session.detach();
+    }
     failPending('bridge shutting down');
     for (const client of wss.clients) client.close(1001, 'bridge shutting down');
     wss.close();
@@ -250,6 +284,24 @@ function tokenOk(presented: string, expected: string): boolean {
   return timingSafeEqual(left, right);
 }
 
+const DIRECT_METHODS = new Set([
+  'list_tabs',
+  'select_tab',
+  'navigate',
+  'snapshot',
+  'click',
+  'type',
+  'press',
+  'scroll',
+  'screenshot',
+  'get_text',
+  'click_xy',
+  'locate',
+  'emulate',
+  'console',
+  'network_errors',
+]);
+
 function defaultTimeout(method: string, params: Record<string, unknown>): number {
   if (method === 'wait') return Number(params.ms) + 2000;
   if (method === 'navigate') return 35000;
@@ -269,6 +321,8 @@ async function handleHttp(
     port: number;
     extensionConnected: () => boolean;
     extensionId: () => string;
+    mode: () => string;
+    cdp: () => string;
   },
 ): Promise<void> {
   if (req.method !== 'GET' && req.method !== 'HEAD') {
@@ -282,6 +336,8 @@ async function handleHttp(
       ok: true,
       extension: ctx.extensionConnected(),
       extensionId: ctx.extensionId(),
+      mode: ctx.mode(),
+      cdp: ctx.cdp(),
       port: ctx.port,
     });
     res.writeHead(200, {

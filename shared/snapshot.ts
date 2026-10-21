@@ -1,4 +1,5 @@
-export const MAX_SNAPSHOT_ITEMS = 80;
+/** H5 pages (uni-app custom elements, cursor:pointer rows) list more controls than a typical form. */
+export const MAX_SNAPSHOT_ITEMS = 300;
 
 export type RawElement = {
   ahId: string;

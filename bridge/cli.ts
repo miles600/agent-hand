@@ -6,24 +6,25 @@ import { VERSION } from '../shared/protocol.js';
 import { normalizeCall } from '../shared/validate.js';
 
 export type CliAction =
-  | { kind: 'help' | 'version' | 'token'; port?: number }
-  | { kind: 'serve' | 'mcp' | 'status'; port?: number }
-  | { kind: 'call'; method: string; params: Record<string, unknown>; port?: number };
+  | { kind: 'help' | 'version' | 'token'; port?: number; cdp?: string }
+  | { kind: 'serve' | 'mcp' | 'status'; port?: number; cdp?: string }
+  | { kind: 'call'; method: string; params: Record<string, unknown>; port?: number; cdp?: string };
 
 export function resolveCli(argv: string[]): CliAction {
-  const { port, rest } = takePort(argv);
+  const { port, cdp, rest } = takeFlags(argv);
   const [command, ...args] = rest;
   if (!command || command === 'help' || command === '--help' || command === '-h') {
-    return { kind: 'help', port };
+    return { kind: 'help', port, cdp };
   }
-  if (command === 'version' || command === '--version') return { kind: 'version', port };
-  if (command === 'token') return { kind: 'token', port };
-  if (command === 'serve') return { kind: 'serve', port };
-  if (command === 'mcp') return { kind: 'mcp', port };
-  if (command === 'status') return { kind: 'status', port };
+  if (command === 'version' || command === '--version') return { kind: 'version', port, cdp };
+  if (command === 'token') return { kind: 'token', port, cdp };
+  if (command === 'serve') return { kind: 'serve', port, cdp };
+  if (command === 'mcp') return { kind: 'mcp', port, cdp };
+  if (command === 'status') return { kind: 'status', port, cdp };
   const call = commandCall(command, args);
+  if (call.method === 'attach_cdp' && !call.params.url && cdp) call.params.url = cdp;
   const normalized = normalizeCall(call.method, call.params);
-  return { kind: 'call', method: normalized.method, params: normalized.params, port };
+  return { kind: 'call', method: normalized.method, params: normalized.params, port, cdp };
 }
 
 export async function main(argv: string[]): Promise<void> {
@@ -42,7 +43,7 @@ export async function main(argv: string[]): Promise<void> {
     return;
   }
   if (action.kind === 'serve') {
-    await runServe(config);
+    await runServe(config, action.cdp);
     return;
   }
   if (action.kind === 'mcp') {
@@ -56,6 +57,9 @@ export async function main(argv: string[]): Promise<void> {
   if (action.kind !== 'call') throw new Error(`unhandled command: ${action.kind}`);
   const client = await BridgeClient.connect(config.port, config.token);
   try {
+    if (action.cdp && action.method !== 'attach_cdp') {
+      await client.call('attach_cdp', { url: action.cdp }, 20000);
+    }
     const result = await client.call(action.method, action.params, clientTimeout(action.method, action.params));
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   } finally {
@@ -63,10 +67,21 @@ export async function main(argv: string[]): Promise<void> {
   }
 }
 
-async function runServe(config: Config): Promise<void> {
+async function runServe(config: Config, cdp?: string): Promise<void> {
   const server = await startBridge({ port: config.port, token: config.token });
   console.error(`agent-hand bridge listening on ws://127.0.0.1:${server.port}`);
   console.error(`demo page: http://127.0.0.1:${server.port}/demo`);
+  if (cdp) {
+    try {
+      const status = await server.call('attach_cdp', { url: cdp });
+      console.error(`attached over CDP at ${cdp}`);
+      console.error(JSON.stringify(status));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`CDP attach failed (${cdp}): ${message}`);
+      console.error('The bridge is still serving the extension. Retry with: agent-hand attach <url>');
+    }
+  }
   if (config.created) {
     console.error('');
     console.error('First run. Paste this token into the extension options page:');
@@ -188,9 +203,44 @@ function commandCall(command: string, args: string[]): { method: string; params:
     }
     case 'wait':
       return { method: 'wait', params: { ms: requiredArg(args, 0, 'milliseconds') } };
+    case 'click-xy':
+      return { method: 'click_xy', params: { x: requiredArg(args, 0, 'x'), y: requiredArg(args, 1, 'y') } };
+    case 'locate': {
+      const text = args.join(' ').trim();
+      if (!text) throw new Error('locate needs the text to find');
+      return { method: 'locate', params: { text } };
+    }
+    case 'emulate': {
+      const name = (args[0] ?? '').toLowerCase();
+      if (!name) throw new Error('emulate needs iphone, pixel, off, or <width> <height>');
+      if (name === 'off' || name === 'iphone' || name === 'pixel') return { method: 'emulate', params: { preset: name } };
+      return { method: 'emulate', params: { width: args[0], height: requiredArg(args, 1, 'height') } };
+    }
+    case 'console':
+      return { method: 'console', params: logArgs(args) };
+    case 'network-errors':
+      return { method: 'network_errors', params: logArgs(args) };
+    case 'attach':
+      return { method: 'attach_cdp', params: args[0] ? { url: args[0] } : {} };
+    case 'detach':
+      return { method: 'detach_cdp', params: {} };
+    case 'reload-extension':
+      return { method: 'reload_extension', params: {} };
     default:
       throw new Error(`unknown command: ${command}\n\n${HELP}`);
   }
+}
+
+function logArgs(args: string[]): Record<string, unknown> {
+  const params: Record<string, unknown> = {};
+  if (args.includes('--clear')) params.clear = true;
+  const index = args.indexOf('--max');
+  if (index >= 0) {
+    const max = args[index + 1];
+    if (!max) throw new Error('--max needs a number');
+    params.max = max;
+  }
+  return params;
 }
 
 function requiredArg(args: string[], index: number, name: string): string {
@@ -199,9 +249,10 @@ function requiredArg(args: string[], index: number, name: string): string {
   return value;
 }
 
-function takePort(argv: string[]): { port?: number; rest: string[] } {
+function takeFlags(argv: string[]): { port?: number; cdp?: string; rest: string[] } {
   const rest: string[] = [];
   let port: number | undefined;
+  let cdp: string | undefined;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--port') {
@@ -215,12 +266,23 @@ function takePort(argv: string[]): { port?: number; rest: string[] } {
       port = Number(arg.slice('--port='.length));
       continue;
     }
+    if (arg === '--cdp') {
+      const value = argv[index + 1];
+      if (!value) throw new Error('--cdp needs an http://127.0.0.1:<port> url');
+      cdp = value;
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith('--cdp=')) {
+      cdp = arg.slice('--cdp='.length);
+      continue;
+    }
     rest.push(arg);
   }
   if (port != null && (!Number.isInteger(port) || port < 0 || port > 65535)) {
     throw new Error(`invalid port: ${port}`);
   }
-  return { port, rest };
+  return { port, cdp, rest };
 }
 
 function clientTimeout(method: string, params: Record<string, unknown>): number {
@@ -229,25 +291,35 @@ function clientTimeout(method: string, params: Record<string, unknown>): number 
   return 30000;
 }
 
-const HELP = `agent-hand — drive a local Chrome with a visible cursor
+const HELP = `agent-hand — drive Chrome, mobile H5, or Electron with a visible cursor
 
 Usage:
-  agent-hand serve [--port 17321]
+  agent-hand serve [--port 17321] [--cdp http://127.0.0.1:9222]
   agent-hand mcp [--port 17321]
   agent-hand token
   agent-hand status
+  agent-hand attach <http://127.0.0.1:port>   direct CDP (Electron / Chromium)
+  agent-hand detach                           close the CDP socket; the app stays open
   agent-hand list-tabs
   agent-hand select-tab <tabId>
   agent-hand navigate <url>
   agent-hand snapshot
   agent-hand click <ref>
+  agent-hand click-xy <x> <y>                 CSS px, same space as snapshot boxes
+  agent-hand locate <text>
   agent-hand type <ref> <text> [--submit]
   agent-hand press <key>
   agent-hand scroll <up|down|left|right|ref> [amount]
+  agent-hand emulate <iphone|pixel|off|width height>
   agent-hand screenshot [--out <path>]
   agent-hand text [--max <n>]
+  agent-hand console [--clear] [--max <n>]
+  agent-hand network-errors [--clear] [--max <n>]
+  agent-hand reload-extension
   agent-hand wait <ms>
 
 The bridge listens on 127.0.0.1 only. On first run it writes a token to
 ~/.agent-hand/config.json. Paste that token into the extension options page.
+--cdp attaches to an app that was started with --remote-debugging-port.
+It does not close that app and does not navigate unless you ask.
 `;
