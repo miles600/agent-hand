@@ -1,0 +1,9 @@
+node_modules/
+dist/
+extension/dist/
+*.log
+.DS_Store
+test-results/
+playwright-report/
+tmp/
+.agent-hand-e2e/

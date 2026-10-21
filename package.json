@@ -1,0 +1,31 @@
+{
+  "name": "agent-hand",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A visible hand for a local AI agent. Drives the user's real Chrome from a loopback bridge.",
+  "type": "module",
+  "bin": {
+    "agent-hand": "./dist/bridge/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.extension.json --noEmit && node scripts/build-extension.mjs",
+    "serve": "node dist/bridge/index.js serve",
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "test:unit": "node --test dist/test/*.test.js",
+    "test:e2e": "node test/e2e.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.326",
+    "@types/node": "^22.18.0",
+    "@types/ws": "^8.18.1",
+    "esbuild": "^0.25.10",
+    "playwright": "^1.56.0",
+    "typescript": "^5.9.2"
+  }
+}

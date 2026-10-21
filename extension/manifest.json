@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "Agent Hand",
+  "version": "0.1.0",
+  "minimum_chrome_version": "120",
+  "description": "Lets a local agent move a visible cursor and send trusted input to this Chrome.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzbK2Dp2Bu6SmUhpmgB9foW53LmS7YqD0vRmsIFdpdB0ChYLE1D0wi9BoslbTjUsZlBsnd9Di7yZWotPneiWZRms4gawUW4AWNxJYoNvxy4b5s5LyNvTqOi7IYTcAOnNoO6ti3fgLBfJsTPnHp6WazskhBmrhDLT3QrySGLiA5MXD7WK4kRpnPIsP0Dl3b4AS3BKg55sgJgjNdlH/x72+Ph1dhu7T8m6bNKztTEZJT0CSLW+nMA7kGeV4cE+S9pHBvVHt6ypjUje6OLyTUGij2z4AeUvSLP5zAc3nnZfis7Rweya5Qkn+dT+tZzLYb2UqmuiiJSoU7VXBpOz3wLbOQQIDAQAB",
+  "permissions": ["debugger", "tabs", "storage", "scripting", "alarms", "webNavigation", "windows"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true
+    }
+  ],
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "action": {
+    "default_title": "Agent Hand",
+    "default_icon": {
+      "16": "icon16.png",
+      "32": "icon32.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icon16.png",
+    "32": "icon32.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  }
+}

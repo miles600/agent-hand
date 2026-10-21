@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Inner page</title>
+    <style>
+      body { margin: 0; padding: 16px; background: #e7eef8; color: #1f1a17; font: 15px/1.4 ui-sans-serif, system-ui, sans-serif; }
+      button { font: inherit; padding: 10px 14px; border: 0; border-radius: 8px; background: #1f1a17; color: white; }
+      p { margin: 10px 0 0; font-weight: 650; }
+    </style>
+  </head>
+  <body>
+    <button id="inner" type="button">Iframe button</button>
+    <p id="inner-count">Iframe trusted clicks: 0</p>
+    <script>
+      let n = 0;
+      document.getElementById('inner').addEventListener('click', (event) => {
+        if (!event.isTrusted) return;
+        n += 1;
+        document.getElementById('inner-count').textContent = 'Iframe trusted clicks: ' + n;
+      });
+    </script>
+  </body>
+</html>

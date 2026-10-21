@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Agent Hand</title>
+    <style>
+      :root { color-scheme: light; }
+      body {
+        margin: 0;
+        padding: 32px 20px 48px;
+        background: #f4efe6;
+        color: #1f1a17;
+        font: 15px/1.45 ui-sans-serif, system-ui, sans-serif;
+      }
+      main { max-width: 440px; margin: 0 auto; }
+      h1 { font-size: 22px; line-height: 1.2; margin: 0 0 8px; }
+      p { margin: 0 0 14px; }
+      label { display: block; font-weight: 650; margin: 14px 0 6px; }
+      input {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 10px 12px;
+        font: inherit;
+        color: #1f1a17;
+        background: #fff;
+        border: 1px solid #d6d3d1;
+        border-radius: 8px;
+      }
+      button {
+        margin-top: 16px;
+        padding: 10px 16px;
+        font: inherit;
+        font-weight: 650;
+        color: #fff;
+        background: #c2410c;
+        border: 0;
+        border-radius: 8px;
+      }
+      button:focus-visible, input:focus-visible {
+        outline: 2px solid #c2410c;
+        outline-offset: 2px;
+      }
+      #status { margin-top: 14px; min-height: 1.4em; font-weight: 650; }
+      .hint { color: #57534e; font-size: 13px; }
+      code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Agent Hand</h1>
+      <p>Paste the token printed by <code>agent-hand serve</code>. The bridge must already be running on this machine.</p>
+      <label for="port">Port</label>
+      <input id="port" inputmode="numeric" autocomplete="off" value="17321" />
+      <label for="token">Token</label>
+      <input id="token" type="password" spellcheck="false" autocomplete="off" />
+      <button id="save" type="button">Save and connect</button>
+      <div id="status" role="status"></div>
+      <p class="hint">Chrome shows a yellow bar while the agent is attached to a tab. That bar is the debugger. Leave it up. The overlay cursor does not block your own mouse.</p>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>
