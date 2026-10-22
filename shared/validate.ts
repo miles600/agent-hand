@@ -1,3 +1,5 @@
+import { normalizeCdpUrl } from './cdp-url.js';
+import { normalizeEmulate } from './emulate.js';
 import { parseKeyCombo } from './keys.js';
 
 const DIRECTIONS = new Set(['up', 'down', 'left', 'right']);
@@ -12,7 +14,7 @@ export function normalizeCall(
     case 'snapshot':
       return { method, params: {} };
     case 'select_tab':
-      return { method, params: { tabId: asInt(input.tabId, 'tabId') } };
+      return { method, params: { tabId: asTargetId(input.tabId) } };
     case 'navigate':
       return { method, params: { url: asHttpUrl(input.url) } };
     case 'click':
@@ -58,6 +60,28 @@ export function normalizeCall(
       if (input.out != null) params.out = asString(input.out, 'out');
       return { method, params };
     }
+    case 'click_xy': {
+      const x = asFinite(input.x, 'x');
+      const y = asFinite(input.y, 'y');
+      if (x < 0 || y < 0 || x > 100000 || y > 100000) throw new Error('click_xy needs viewport CSS pixels');
+      return { method, params: withMotion({ x, y }, input) };
+    }
+    case 'locate': {
+      const text = asString(input.text, 'text');
+      if (!text.trim()) throw new Error('text is required');
+      if (text.length > 500) throw new Error('text is too long');
+      return { method, params: { text } };
+    }
+    case 'emulate':
+      return { method, params: normalizeEmulate(input) };
+    case 'console':
+    case 'network_errors':
+      return { method, params: logParams(input) };
+    case 'reload_extension':
+    case 'detach_cdp':
+      return { method, params: {} };
+    case 'attach_cdp':
+      return { method, params: { url: normalizeCdpUrl(input.url) } };
     case 'get_text': {
       const max = input.max == null ? 8000 : asInt(input.max, 'max');
       if (max < 1 || max > 50000) throw new Error('max out of range');
@@ -113,6 +137,36 @@ function asDuration(value: unknown): number | undefined {
 function asString(value: unknown, name: string): string {
   if (typeof value !== 'string') throw new Error(`${name} is required`);
   return value;
+}
+
+function logParams(input: Record<string, unknown>): Record<string, unknown> {
+  const params: Record<string, unknown> = {};
+  if (input.clear === true || input.clear === 'true') params.clear = true;
+  if (input.max != null) {
+    const max = asInt(input.max, 'max');
+    if (max < 1 || max > 500) throw new Error('max out of range');
+    params.max = max;
+  }
+  return params;
+}
+
+function asTargetId(value: unknown): number | string {
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 0) return value;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (/^\d+$/.test(trimmed)) {
+      const parsed = Number(trimmed);
+      if (Number.isSafeInteger(parsed)) return parsed;
+    }
+    if (/^[A-Za-z0-9._:-]{1,200}$/.test(trimmed)) return trimmed;
+  }
+  throw new Error('tabId is required');
+}
+
+function asFinite(value: unknown, name: string): number {
+  const parsed = typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : Number.NaN;
+  if (!Number.isFinite(parsed)) throw new Error(`${name} must be a number`);
+  return parsed;
 }
 
 function asInt(value: unknown, name: string): number {

@@ -2,7 +2,7 @@
   "name": "agent-hand",
   "version": "0.1.0",
   "private": true,
-  "description": "A visible hand for a local AI agent. Drives the user's real Chrome from a loopback bridge.",
+  "description": "A visible hand for a local AI agent. Drives Chrome pages, mobile H5, and Electron from a loopback bridge.",
   "type": "module",
   "bin": {
     "agent-hand": "./dist/bridge/index.js"

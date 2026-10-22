@@ -37,6 +37,16 @@ await esbuild.build({
   sourcemap: true,
 });
 
+await esbuild.build({
+  entryPoints: ['extension/src/inject.ts'],
+  bundle: true,
+  outfile: 'dist/inject.js',
+  format: 'iife',
+  target: 'chrome120',
+  legalComments: 'none',
+  sourcemap: false,
+});
+
 await copyFile('extension/manifest.json', `${outdir}/manifest.json`);
 await copyFile('extension/src/options.html', `${outdir}/options.html`);
 

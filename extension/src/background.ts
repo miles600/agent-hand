@@ -1,6 +1,16 @@
 import { viewportCssPoint } from '../../shared/coords.js';
+import { resolveEmulation } from '../../shared/emulate.js';
 import { matchFrameRect, type FrameRect } from '../../shared/frames.js';
+import { INPUT_TIMEOUT_MS, isInputFallbackError } from '../../shared/input.js';
 import { parseKeyCombo, type KeyDispatch } from '../../shared/keys.js';
+import {
+  consoleFromCdp,
+  mergeConsole,
+  networkFromCdp,
+  pushCapped,
+  type ConsoleMessage,
+  type NetworkError,
+} from '../../shared/monitor.js';
 import { DEFAULT_CURSOR_MS, DEFAULT_PORT } from '../../shared/protocol.js';
 import { sleep } from '../../shared/sleep.js';
 import { buildSnapshot, type RawElement, type SnapshotItem } from '../../shared/snapshot.js';
@@ -19,7 +29,11 @@ let attempt = 0;
 let lastError = 'Paste the bridge token on the options page';
 let selectedTabId: number | null = null;
 let refMap = new Map<number, RefRecord>();
+let touchEmulated = false;
 const attached = new Set<number>();
+const consoleByTab = new Map<number, ConsoleMessage[]>();
+const networkByTab = new Map<number, NetworkError[]>();
+const requestUrls = new Map<number, Map<string, string>>();
 
 void startup();
 
@@ -62,6 +76,25 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 chrome.debugger.onDetach.addListener((source) => {
   if (source.tabId != null) attached.delete(source.tabId);
+});
+
+chrome.debugger.onEvent.addListener((source, method, params) => {
+  const tabId = source.tabId;
+  if (tabId == null) return;
+  const logged = consoleFromCdp(method, params);
+  if (logged) {
+    const list = consoleByTab.get(tabId) ?? [];
+    pushCapped(list, logged);
+    consoleByTab.set(tabId, list);
+  }
+  const urls = requestUrls.get(tabId) ?? new Map<string, string>();
+  requestUrls.set(tabId, urls);
+  const failure = networkFromCdp(method, params, urls);
+  if (failure) {
+    const list = networkByTab.get(tabId) ?? [];
+    pushCapped(list, failure);
+    networkByTab.set(tabId, list);
+  }
 });
 
 async function startup(): Promise<void> {
@@ -193,7 +226,8 @@ async function dispatch(method: string, params: Record<string, unknown>): Promis
     case 'list_tabs':
       return listTabs();
     case 'select_tab':
-      return selectTab(requiredInt(params.tabId, 'tabId'));
+      if (typeof params.tabId !== 'number') throw new Error('tabId must be a number from list-tabs');
+      return selectTab(params.tabId);
     case 'navigate':
       return navigate(requiredString(params.url, 'url'));
     case 'snapshot':
@@ -210,6 +244,18 @@ async function dispatch(method: string, params: Record<string, unknown>): Promis
       return screenshot();
     case 'get_text':
       return getText(typeof params.max === 'number' ? params.max : 8000);
+    case 'click_xy':
+      return clickXY(params);
+    case 'locate':
+      return locateText(requiredString(params.text, 'text'));
+    case 'emulate':
+      return emulate(params);
+    case 'console':
+      return readConsole(params);
+    case 'network_errors':
+      return readNetwork(params);
+    case 'reload_extension':
+      return reloadExtension();
     default:
       throw new Error(`unknown method: ${method}`);
   }
@@ -342,9 +388,10 @@ async function click(params: Record<string, unknown>): Promise<unknown> {
   }
   await move;
   await cursorRipple(tabId);
-  await mouseClick(tabId, at.x, at.y);
+  const via = await clickAt(tabId, at.x, at.y, entry.frameId, at.localX, at.localY);
   return {
     ref,
+    via,
     x: at.x,
     y: at.y,
     devicePixelRatio: at.devicePixelRatio,
@@ -364,15 +411,28 @@ async function typeText(params: Record<string, unknown>): Promise<unknown> {
   const at = await reveal(tabId, entry);
   await cursorMove(tabId, at.x, at.y, 'Type', durationOf(params));
   await cursorRipple(tabId);
-  await mouseClick(tabId, at.x, at.y);
+  const clickVia = await clickAt(tabId, at.x, at.y, entry.frameId, at.localX, at.localY);
   await ask(tabId, entry.frameId, 'focus', { ahId: entry.ahId });
   await sleep(40);
-  await sendCommand(tabId, 'Input.insertText', { text });
+  let via: 'trusted' | 'synthetic' = 'trusted';
+  if (clickVia !== 'trusted') {
+    via = 'synthetic';
+    await setFieldValue(tabId, entry.frameId, entry.ahId, text);
+  } else {
+    try {
+      await sendCommand(tabId, 'Input.insertText', { text });
+    } catch (error) {
+      if (!isInputFallbackError(error)) throw error;
+      via = 'synthetic';
+      await restoreAttached(tabId);
+      await setFieldValue(tabId, entry.frameId, entry.ahId, text);
+    }
+  }
   if (params.submit === true) {
     await cursorLabel(tabId, 'Submit');
-    await keyDownUp(tabId, parseKeyCombo('Enter'));
+    await pressEnter(tabId, via);
   }
-  return { ref, length: text.length, submitted: params.submit === true };
+  return { ref, length: text.length, submitted: params.submit === true, via, clickVia };
 }
 
 async function press(key: string): Promise<unknown> {
@@ -383,8 +443,15 @@ async function press(key: string): Promise<unknown> {
   await attachSettled(tabId);
   const parsed = parseKeyCombo(key);
   await cursorLabel(tabId, `Press ${parsed.key}`);
-  await keyDownUp(tabId, parsed);
-  return { key: parsed.key };
+  try {
+    await keyDownUp(tabId, parsed);
+    return { key: parsed.key, via: 'trusted' };
+  } catch (error) {
+    if (!isInputFallbackError(error)) throw error;
+    await restoreAttached(tabId);
+    await deliverSyntheticKey(tabId, parsed);
+    return { key: parsed.key, via: 'synthetic' };
+  }
 }
 
 async function scroll(params: Record<string, unknown>): Promise<unknown> {
@@ -405,8 +472,15 @@ async function scroll(params: Record<string, unknown>): Promise<unknown> {
   await cursorMove(tabId, at.x, at.y, `Scroll ${direction}`, 420);
   const amount = typeof params.amount === 'number' ? params.amount : 480;
   const delta = wheelDelta(direction, amount);
-  await mouseWheel(tabId, at.x, at.y, delta.x, delta.y);
-  return { direction, amount, x: at.x, y: at.y, devicePixelRatio: metrics.devicePixelRatio };
+  try {
+    await mouseWheel(tabId, at.x, at.y, delta.x, delta.y);
+    return { direction, amount, x: at.x, y: at.y, devicePixelRatio: metrics.devicePixelRatio, via: 'trusted' };
+  } catch (error) {
+    if (!isInputFallbackError(error)) throw error;
+    await restoreAttached(tabId);
+    await ask(tabId, 0, 'synthetic-scroll', { x: at.x, y: at.y, deltaX: delta.x, deltaY: delta.y });
+    return { direction, amount, x: at.x, y: at.y, devicePixelRatio: metrics.devicePixelRatio, via: 'synthetic' };
+  }
 }
 
 async function screenshot(): Promise<unknown> {
@@ -444,13 +518,13 @@ async function getText(max: number): Promise<unknown> {
   return { text: combined.slice(0, max), truncated: combined.length > max, length: combined.length };
 }
 
-async function reveal(tabId: number, entry: RefRecord): Promise<{ x: number; y: number; devicePixelRatio: number }> {
+async function reveal(tabId: number, entry: RefRecord): Promise<{ x: number; y: number; localX: number; localY: number; devicePixelRatio: number }> {
   await scrollFramesIntoView(tabId, entry.frameId);
   const box = await ask<Box>(tabId, entry.frameId, 'prepare', { ahId: entry.ahId });
   const origin = await originOf(tabId, entry.frameId);
   const metrics = await ask<Metrics>(tabId, 0, 'metrics');
   const point = viewportCssPoint(box.x + origin.x, box.y + origin.y, metrics.devicePixelRatio);
-  return { ...point, devicePixelRatio: metrics.devicePixelRatio };
+  return { ...point, localX: box.x, localY: box.y, devicePixelRatio: metrics.devicePixelRatio };
 }
 
 async function scrollFramesIntoView(tabId: number, frameId: number): Promise<void> {
@@ -631,6 +705,7 @@ async function attachSettled(tabId: number): Promise<void> {
   }
   attached.add(tabId);
   await sleep(300);
+  await enableMonitoring(tabId);
 }
 
 function debuggerAttach(tabId: number): Promise<void> {
@@ -659,14 +734,208 @@ async function detachAll(): Promise<void> {
   }
 }
 
-function sendCommand(tabId: number, method: string, params?: Record<string, unknown>): Promise<unknown> {
+function sendCommand(tabId: number, method: string, params?: Record<string, unknown>, timeoutMs?: number): Promise<unknown> {
+  const limit = timeoutMs ?? (method.startsWith('Input.') ? INPUT_TIMEOUT_MS : 0);
   return new Promise((resolve, reject) => {
+    let done = false;
+    const timer = limit
+      ? setTimeout(() => {
+        if (done) return;
+        done = true;
+        // Leave the debugger attached. Detaching here makes the next command fail
+        // with "Debugger is not attached" while Chrome still considers us attached,
+        // or drops the session the page still needs.
+        reject(new Error(`${method} timed out`));
+      }, limit) as unknown as number
+      : 0;
     chrome.debugger.sendCommand({ tabId }, method, params, (result) => {
       const err = chrome.runtime.lastError;
-      if (err) reject(new Error(err.message ?? `${method} failed`));
-      else resolve(result);
+      if (done) return;
+      done = true;
+      if (timer) clearTimeout(timer);
+      if (err) {
+        const message = err.message ?? `${method} failed`;
+        if (/not attached|detached while/i.test(message)) attached.delete(tabId);
+        reject(new Error(message));
+      } else resolve(result);
     });
   });
+}
+
+async function enableMonitoring(tabId: number): Promise<void> {
+  await sendCommand(tabId, 'Runtime.enable', {}, 1500).catch(() => undefined);
+  await sendCommand(tabId, 'Network.enable', {}, 1500).catch(() => undefined);
+}
+
+async function restoreAttached(tabId: number): Promise<void> {
+  if (attached.has(tabId)) return;
+  try {
+    await debuggerAttach(tabId);
+    attached.add(tabId);
+    await enableMonitoring(tabId);
+  } catch {
+    // DevTools may own the tab. DOM fallbacks still run without the debugger.
+  }
+}
+
+async function clickAt(
+  tabId: number,
+  x: number,
+  y: number,
+  frameId = 0,
+  localX = x,
+  localY = y,
+): Promise<'trusted' | 'synthetic'> {
+  try {
+    await mouseClick(tabId, x, y);
+    return 'trusted';
+  } catch (error) {
+    if (!isInputFallbackError(error)) throw error;
+    await restoreAttached(tabId);
+    await ask(tabId, frameId, 'synthetic-click', {
+      x: localX,
+      y: localY,
+      pointerType: touchEmulated ? 'touch' : 'mouse',
+    });
+    return 'synthetic';
+  }
+}
+
+async function clickXY(params: Record<string, unknown>): Promise<unknown> {
+  const x = Number(params.x);
+  const y = Number(params.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error('x and y are required');
+  const tab = await controllableTab();
+  const tabId = tab.id as number;
+  await focusTab(tab);
+  await ensureReady(tabId);
+  await attachSettled(tabId);
+  await cursorMove(tabId, x, y, 'Click', durationOf(params));
+  await cursorRipple(tabId);
+  const via = await clickAt(tabId, x, y);
+  return { x, y, via };
+}
+
+async function locateText(text: string): Promise<unknown> {
+  const tab = await controllableTab();
+  const tabId = tab.id as number;
+  await ensureReady(tabId);
+  const matches = await ask(tabId, 0, 'locate', { text });
+  return { text, matches };
+}
+
+async function setFieldValue(tabId: number, frameId: number, ahId: string, text: string): Promise<void> {
+  const ok = await ask<boolean>(tabId, frameId, 'set-value', { ahId, text });
+  if (!ok) throw new Error('could not set the field value');
+}
+
+async function pressEnter(tabId: number, via: 'trusted' | 'synthetic'): Promise<void> {
+  const enter = parseKeyCombo('Enter');
+  if (via !== 'trusted') {
+    await deliverSyntheticKey(tabId, enter);
+    return;
+  }
+  try {
+    await keyDownUp(tabId, enter);
+  } catch (error) {
+    if (!isInputFallbackError(error)) throw error;
+    await restoreAttached(tabId);
+    await deliverSyntheticKey(tabId, enter);
+  }
+}
+
+async function deliverSyntheticKey(tabId: number, key: KeyDispatch): Promise<void> {
+  const frames = await getAllFrames(tabId).catch(() => [] as FrameInfo[]);
+  const targets = frames.length ? relevantFrames(frames) : [];
+  let acted = false;
+  for (const frame of targets) {
+    try {
+      const result = await ask<{ acted?: boolean }>(tabId, frame.frameId, 'synthetic-key', { key, force: true }, 2000);
+      if (result?.acted) acted = true;
+    } catch {
+      // that frame has no content script
+    }
+  }
+  if (!acted) await ask(tabId, 0, 'synthetic-key', { key, force: true });
+}
+
+async function emulate(params: Record<string, unknown>): Promise<unknown> {
+  const tab = await controllableTab();
+  const tabId = tab.id as number;
+  await focusTab(tab);
+  await ensureReady(tabId);
+  await attachSettled(tabId);
+  const spec = resolveEmulation(params);
+  if (spec.preset === 'off') {
+    touchEmulated = false;
+    await sendCommand(tabId, 'Emulation.clearDeviceMetricsOverride', {}, 5000);
+    await sendCommand(tabId, 'Emulation.setTouchEmulationEnabled', { enabled: false }, 5000);
+    await sendCommand(tabId, 'Emulation.setUserAgentOverride', { userAgent: '' }, 5000).catch(() => undefined);
+    return { preset: 'off', touch: false };
+  }
+  await sendCommand(tabId, 'Emulation.setDeviceMetricsOverride', {
+    width: spec.width,
+    height: spec.height,
+    deviceScaleFactor: spec.deviceScaleFactor,
+    mobile: spec.mobile,
+  }, 5000);
+  await sendCommand(tabId, 'Emulation.setTouchEmulationEnabled', {
+    enabled: spec.mobile,
+    maxTouchPoints: spec.mobile ? 5 : 1,
+  }, 5000);
+  if (spec.userAgent) {
+    await sendCommand(tabId, 'Emulation.setUserAgentOverride', { userAgent: spec.userAgent }, 5000);
+  }
+  touchEmulated = spec.mobile;
+  return {
+    preset: spec.preset,
+    width: spec.width,
+    height: spec.height,
+    deviceScaleFactor: spec.deviceScaleFactor,
+    mobile: spec.mobile,
+    touch: spec.mobile,
+  };
+}
+
+async function readConsole(params: Record<string, unknown>): Promise<unknown> {
+  const tab = await controllableTab();
+  const tabId = tab.id as number;
+  const max = typeof params.max === 'number' ? params.max : 100;
+  const clear = params.clear === true;
+  const frames = await ensureReady(tabId);
+  const pageLogs: ConsoleMessage[] = [];
+  for (const frame of relevantFrames(frames)) {
+    try {
+      const rows = await ask<ConsoleMessage[]>(tabId, frame.frameId, 'console', { clear, max }, 2000);
+      if (Array.isArray(rows)) pageLogs.push(...rows);
+    } catch {
+      // frame cannot answer
+    }
+  }
+  const cdpLogs = consoleByTab.get(tabId) ?? [];
+  if (clear) consoleByTab.set(tabId, []);
+  return { messages: mergeConsole([...cdpLogs, ...pageLogs], max) };
+}
+
+async function readNetwork(params: Record<string, unknown>): Promise<unknown> {
+  const tab = await controllableTab();
+  const tabId = tab.id as number;
+  const max = typeof params.max === 'number' ? params.max : 100;
+  const clear = params.clear === true;
+  let warning = '';
+  try {
+    await attachSettled(tabId);
+  } catch (error) {
+    warning = error instanceof Error ? error.message : String(error);
+  }
+  const errors = (networkByTab.get(tabId) ?? []).slice(-max);
+  if (clear) networkByTab.set(tabId, []);
+  return warning ? { errors, warning } : { errors };
+}
+
+function reloadExtension(): { reloading: true } {
+  setTimeout(() => chrome.runtime.reload(), 150);
+  return { reloading: true };
 }
 
 async function mouseClick(tabId: number, x: number, y: number): Promise<void> {
