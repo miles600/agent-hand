@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { resolveCli } from '../bridge/cli.js';
 
@@ -55,7 +56,45 @@ test('parses the commands from the demo script', () => {
   });
   assert.equal(resolveCli(['attach', 'http://127.0.0.1:9222']).kind, 'call');
   assert.equal(resolveCli(['emulate', 'iphone']).kind, 'call');
+  assert.deepEqual(resolveCli(['emulate', '390x844@3']), {
+    kind: 'call',
+    method: 'emulate',
+    params: { width: 390, height: 844, deviceScaleFactor: 3, mobile: true },
+    port: undefined,
+    cdp: undefined,
+  });
+  assert.deepEqual(resolveCli(['emulate', '390x844', '--fit-window']), {
+    kind: 'call',
+    method: 'emulate',
+    params: { width: 390, height: 844, deviceScaleFactor: 2, mobile: true, fitWindow: true },
+    port: undefined,
+    cdp: undefined,
+  });
+  assert.deepEqual(resolveCli(['--fit-window', 'emulate', 'off']), {
+    kind: 'call',
+    method: 'emulate',
+    params: { preset: 'off', fitWindow: true },
+    port: undefined,
+    cdp: undefined,
+  });
+  assert.throws(() => resolveCli(['--fit-window', 'click', '1']), /only for emulate/);
+  assert.deepEqual(resolveCli(['--require-trusted', 'click', '3']), {
+    kind: 'call',
+    method: 'click',
+    params: { ref: 3, requireTrusted: true },
+    port: undefined,
+    cdp: undefined,
+    requireTrusted: true,
+  });
   assert.equal(resolveCli(['press', 'Ctrl+A']).kind, 'call');
   assert.throws(() => resolveCli(['navigate', 'file:///tmp/x']), /http/);
   assert.throws(() => resolveCli(['attach', 'http://example.com:9222']), /loopback/);
+});
+
+test('help mentions exact viewport sizes and require-trusted', () => {
+  const result = spawnSync(process.execPath, ['dist/bridge/index.js', '--help'], { encoding: 'utf8' });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /390x844/);
+  assert.match(result.stdout, /require-trusted/);
+  assert.match(result.stdout, /fit-window/);
 });

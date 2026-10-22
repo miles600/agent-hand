@@ -57,6 +57,10 @@ function installListener(api: PageApi): void {
       sendResponse({ ok: true, result: api.metrics() });
       return undefined;
     }
+    if (msg.type === 'window-chrome') {
+      sendResponse({ ok: true, result: api.windowChrome() });
+      return undefined;
+    }
     if (msg.type === 'text') {
       sendResponse({ ok: true, result: api.text() });
       return undefined;
@@ -70,6 +74,11 @@ function installListener(api: PageApi): void {
         ok: true,
         result: api.syntheticClick(Number(msg.x), Number(msg.y), typeof msg.pointerType === 'string' ? msg.pointerType : 'mouse'),
       });
+      return undefined;
+    }
+    if (msg.type === 'arm-click') {
+      api.armClick(Number(msg.x), Number(msg.y));
+      sendResponse({ ok: true });
       return undefined;
     }
     if (msg.type === 'locate') {

@@ -2,29 +2,35 @@ import { BridgeClient, type Hand } from './client.js';
 import { loadConfig, type Config } from './config.js';
 import { serveMcp } from './mcp.js';
 import { startBridge } from './server.js';
+import { TRUSTED_INPUT_METHODS } from '../shared/input.js';
 import { VERSION } from '../shared/protocol.js';
 import { normalizeCall } from '../shared/validate.js';
 
 export type CliAction =
-  | { kind: 'help' | 'version' | 'token'; port?: number; cdp?: string }
-  | { kind: 'serve' | 'mcp' | 'status'; port?: number; cdp?: string }
-  | { kind: 'call'; method: string; params: Record<string, unknown>; port?: number; cdp?: string };
+  | { kind: 'help' | 'version' | 'token'; port?: number; cdp?: string; requireTrusted?: boolean }
+  | { kind: 'serve' | 'mcp' | 'status'; port?: number; cdp?: string; requireTrusted?: boolean }
+  | { kind: 'call'; method: string; params: Record<string, unknown>; port?: number; cdp?: string; requireTrusted?: boolean };
 
 export function resolveCli(argv: string[]): CliAction {
-  const { port, cdp, rest } = takeFlags(argv);
+  const { port, cdp, requireTrusted, fitWindow, rest } = takeFlags(argv);
+  const trusted = requireTrusted ? { requireTrusted: true as const } : {};
   const [command, ...args] = rest;
   if (!command || command === 'help' || command === '--help' || command === '-h') {
-    return { kind: 'help', port, cdp };
+    return { kind: 'help', port, cdp, ...trusted };
   }
-  if (command === 'version' || command === '--version') return { kind: 'version', port, cdp };
-  if (command === 'token') return { kind: 'token', port, cdp };
-  if (command === 'serve') return { kind: 'serve', port, cdp };
-  if (command === 'mcp') return { kind: 'mcp', port, cdp };
-  if (command === 'status') return { kind: 'status', port, cdp };
+  if (command === 'version' || command === '--version') return { kind: 'version', port, cdp, ...trusted };
+  if (command === 'token') return { kind: 'token', port, cdp, ...trusted };
+  if (command === 'serve') return { kind: 'serve', port, cdp, ...trusted };
+  if (command === 'mcp') return { kind: 'mcp', port, cdp, ...trusted };
+  if (command === 'status') return { kind: 'status', port, cdp, ...trusted };
   const call = commandCall(command, args);
   if (call.method === 'attach_cdp' && !call.params.url && cdp) call.params.url = cdp;
-  const normalized = normalizeCall(call.method, call.params);
-  return { kind: 'call', method: normalized.method, params: normalized.params, port, cdp };
+  const normalized = normalizeCall(call.method, requireTrusted ? { ...call.params, requireTrusted: true } : call.params);
+  if (fitWindow) {
+    if (normalized.method !== 'emulate') throw new Error('--fit-window is only for emulate');
+    normalized.params.fitWindow = true;
+  }
+  return { kind: 'call', method: normalized.method, params: normalized.params, port, cdp, ...trusted };
 }
 
 export async function main(argv: string[]): Promise<void> {
@@ -38,16 +44,17 @@ export async function main(argv: string[]): Promise<void> {
     return;
   }
   const config = await loadConfig({ port: action.port });
+  const requireTrusted = action.requireTrusted === true || config.requireTrusted;
   if (action.kind === 'token') {
     process.stdout.write(`${config.token}\n`);
     return;
   }
   if (action.kind === 'serve') {
-    await runServe(config, action.cdp);
+    await runServe(config, action.cdp, requireTrusted);
     return;
   }
   if (action.kind === 'mcp') {
-    await runMcp(config);
+    await runMcp(config, requireTrusted);
     return;
   }
   if (action.kind === 'status') {
@@ -60,15 +67,20 @@ export async function main(argv: string[]): Promise<void> {
     if (action.cdp && action.method !== 'attach_cdp') {
       await client.call('attach_cdp', { url: action.cdp }, 20000);
     }
-    const result = await client.call(action.method, action.params, clientTimeout(action.method, action.params));
+    const params = { ...action.params };
+    if (requireTrusted && TRUSTED_INPUT_METHODS.has(action.method)) params.requireTrusted = true;
+    const result = await client.call(action.method, params, clientTimeout(action.method, action.params));
+    if (result && typeof result === 'object' && 'warning' in result && typeof (result as { warning?: unknown }).warning === 'string') {
+      console.error((result as { warning: string }).warning);
+    }
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   } finally {
     client.close();
   }
 }
 
-async function runServe(config: Config, cdp?: string): Promise<void> {
-  const server = await startBridge({ port: config.port, token: config.token });
+async function runServe(config: Config, cdp: string | undefined, requireTrusted: boolean): Promise<void> {
+  const server = await startBridge({ port: config.port, token: config.token, requireTrusted });
   console.error(`agent-hand bridge listening on ws://127.0.0.1:${server.port}`);
   console.error(`demo page: http://127.0.0.1:${server.port}/demo`);
   if (cdp) {
@@ -99,8 +111,8 @@ async function runServe(config: Config, cdp?: string): Promise<void> {
   });
 }
 
-async function runMcp(config: Config): Promise<void> {
-  const session = await hostOrConnect(config);
+async function runMcp(config: Config, requireTrusted: boolean): Promise<void> {
+  const session = await hostOrConnect(config, requireTrusted);
   if (session.hosted) {
     console.error(`agent-hand bridge listening on ws://127.0.0.1:${session.port}`);
     console.error(`demo page: http://127.0.0.1:${session.port}/demo`);
@@ -112,15 +124,15 @@ async function runMcp(config: Config): Promise<void> {
     console.error(`using the agent-hand bridge at 127.0.0.1:${session.port}`);
   }
   try {
-    await serveMcp(session.hand);
+    await serveMcp(session.hand, { requireTrusted });
   } finally {
     await session.close();
   }
 }
 
-async function hostOrConnect(config: Config): Promise<{ hand: Hand; close: () => Promise<void>; hosted: boolean; port: number }> {
+async function hostOrConnect(config: Config, requireTrusted: boolean): Promise<{ hand: Hand; close: () => Promise<void>; hosted: boolean; port: number }> {
   try {
-    const server = await startBridge({ port: config.port, token: config.token });
+    const server = await startBridge({ port: config.port, token: config.token, requireTrusted });
     return { hand: server, close: () => server.close(), hosted: true, port: server.port };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
@@ -211,10 +223,14 @@ function commandCall(command: string, args: string[]): { method: string; params:
       return { method: 'locate', params: { text } };
     }
     case 'emulate': {
-      const name = (args[0] ?? '').toLowerCase();
-      if (!name) throw new Error('emulate needs iphone, pixel, off, or <width> <height>');
-      if (name === 'off' || name === 'iphone' || name === 'pixel') return { method: 'emulate', params: { preset: name } };
-      return { method: 'emulate', params: { width: args[0], height: requiredArg(args, 1, 'height') } };
+      const name = (args[0] ?? '').trim();
+      const lower = name.toLowerCase();
+      if (!name) throw new Error('emulate needs iphone, pixel, off, or a size like 390x844 or 390x844@3');
+      if (lower === 'off' || lower === 'iphone' || lower === 'pixel') return { method: 'emulate', params: { preset: lower } };
+      if (/^\d+x\d+(?:@[\d.]+)?$/i.test(name)) return { method: 'emulate', params: { size: name } };
+      const params: Record<string, unknown> = { width: args[0], height: requiredArg(args, 1, 'height') };
+      if (args[2] != null) params.deviceScaleFactor = args[2];
+      return { method: 'emulate', params };
     }
     case 'console':
       return { method: 'console', params: logArgs(args) };
@@ -249,10 +265,12 @@ function requiredArg(args: string[], index: number, name: string): string {
   return value;
 }
 
-function takeFlags(argv: string[]): { port?: number; cdp?: string; rest: string[] } {
+function takeFlags(argv: string[]): { port?: number; cdp?: string; requireTrusted: boolean; fitWindow: boolean; rest: string[] } {
   const rest: string[] = [];
   let port: number | undefined;
   let cdp: string | undefined;
+  let requireTrusted = false;
+  let fitWindow = false;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--port') {
@@ -277,12 +295,20 @@ function takeFlags(argv: string[]): { port?: number; cdp?: string; rest: string[
       cdp = arg.slice('--cdp='.length);
       continue;
     }
+    if (arg === '--require-trusted') {
+      requireTrusted = true;
+      continue;
+    }
+    if (arg === '--fit-window') {
+      fitWindow = true;
+      continue;
+    }
     rest.push(arg);
   }
   if (port != null && (!Number.isInteger(port) || port < 0 || port > 65535)) {
     throw new Error(`invalid port: ${port}`);
   }
-  return { port, cdp, rest };
+  return { port, cdp, requireTrusted, fitWindow, rest };
 }
 
 function clientTimeout(method: string, params: Record<string, unknown>): number {
@@ -310,7 +336,7 @@ Usage:
   agent-hand type <ref> <text> [--submit]
   agent-hand press <key>
   agent-hand scroll <up|down|left|right|ref> [amount]
-  agent-hand emulate <iphone|pixel|off|width height>
+  agent-hand emulate <iphone|pixel|off|390x844|390x844@3|width height [dpr]> [--fit-window]
   agent-hand screenshot [--out <path>]
   agent-hand text [--max <n>]
   agent-hand console [--clear] [--max <n>]
@@ -318,8 +344,19 @@ Usage:
   agent-hand reload-extension
   agent-hand wait <ms>
 
+--require-trusted    fail click, type, press, scroll, and click-xy instead of
+                     sending a synthetic event. Also set by
+                     AGENT_HAND_REQUIRE_TRUSTED=1 or "requireTrusted": true
+                     in the config file. Default is the synthetic fallback.
+
 The bridge listens on 127.0.0.1 only. On first run it writes a token to
 ~/.agent-hand/config.json. Paste that token into the extension options page.
 --cdp attaches to an app that was started with --remote-debugging-port.
 It does not close that app and does not navigate unless you ask.
+emulate 390x844@3 sets a 390 by 844 CSS viewport at device pixel ratio 3,
+with mobile and touch, and keeps it while DevTools is closed.
+--fit-window resizes the real Chrome window so the page content matches
+that CSS size. The window holds your other tabs too. emulate off puts the
+previous size and maximized/fullscreen state back. Without the flag the
+window is never moved or resized.
 `;

@@ -1,7 +1,24 @@
 import { viewportCssPoint } from '../../shared/coords.js';
-import { resolveEmulation } from '../../shared/emulate.js';
+import {
+  applyEmulation,
+  deviceMetricsOverride,
+  resolveEmulation,
+  restoreFittedWindow,
+  runFittedEmulation,
+  viewportMatches,
+  wantsFitWindow,
+  type EmulationSpec,
+  type WindowBox,
+  type WindowState,
+} from '../../shared/emulate.js';
 import { matchFrameRect, type FrameRect } from '../../shared/frames.js';
-import { INPUT_TIMEOUT_MS, isInputFallbackError } from '../../shared/input.js';
+import {
+  INPUT_TIMEOUT_MS,
+  isInputFallbackError,
+  requiresTrustedInput,
+  syntheticInputWarning,
+  trustedInputRequiredError,
+} from '../../shared/input.js';
 import { parseKeyCombo, type KeyDispatch } from '../../shared/keys.js';
 import {
   consoleFromCdp,
@@ -14,6 +31,12 @@ import {
 import { DEFAULT_CURSOR_MS, DEFAULT_PORT } from '../../shared/protocol.js';
 import { sleep } from '../../shared/sleep.js';
 import { buildSnapshot, type RawElement, type SnapshotItem } from '../../shared/snapshot.js';
+import {
+  nextScreenshotScale,
+  pngDimensionsFromBase64,
+  screenshotScaleReport,
+  viewportScreenshotParams,
+} from '../../shared/screenshot.js';
 
 type RefRecord = { ref: number; ahId: string; frameId: number };
 type PageElement = Omit<RawElement, 'frameId'>;
@@ -30,6 +53,11 @@ let lastError = 'Paste the bridge token on the options page';
 let selectedTabId: number | null = null;
 let refMap = new Map<number, RefRecord>();
 let touchEmulated = false;
+let activeEmulation: EmulationSpec | null = null;
+/** Original window, kept when --fit-window resized it, so emulate off can put it back. */
+let savedFit: (WindowBox & { windowId: number }) | null = null;
+/** Set when attach is refused because DevTools already holds the debugger. */
+let lastAttachProblem = '';
 const attached = new Set<number>();
 const consoleByTab = new Map<number, ConsoleMessage[]>();
 const networkByTab = new Map<number, NetworkError[]>();
@@ -102,6 +130,11 @@ async function startup(): Promise<void> {
     await recallRefs();
   } catch {
     // session storage can be empty on a fresh install
+  }
+  try {
+    await recallEmulation();
+  } catch {
+    // same as above
   }
   try {
     await recallTab();
@@ -237,7 +270,7 @@ async function dispatch(method: string, params: Record<string, unknown>): Promis
     case 'type':
       return typeText(params);
     case 'press':
-      return press(requiredString(params.key, 'key'));
+      return press(requiredString(params.key, 'key'), requiresTrustedInput(params));
     case 'scroll':
       return scroll(params);
     case 'screenshot':
@@ -316,6 +349,7 @@ async function navigate(url: string): Promise<unknown> {
   await done;
   const fresh = await chrome.tabs.get(tabId);
   await focusTab(fresh);
+  await holdEmulation(tabId);
   return { tabId, url: fresh.url ?? url };
 }
 
@@ -324,6 +358,7 @@ async function snapshot(): Promise<unknown> {
   const tabId = tab.id as number;
   await focusTab(tab);
   const frames = await ensureReady(tabId);
+  await holdEmulation(tabId);
   const wanted = relevantFrames(frames);
   const collected: { frameId: number; elements: PageElement[] }[] = [];
   let mainOk = false;
@@ -388,10 +423,11 @@ async function click(params: Record<string, unknown>): Promise<unknown> {
   }
   await move;
   await cursorRipple(tabId);
-  const via = await clickAt(tabId, at.x, at.y, entry.frameId, at.localX, at.localY);
+  const delivered = await clickAt(tabId, at.x, at.y, entry.frameId, at.localX, at.localY, requiresTrustedInput(params));
   return {
+    ...(delivered.warning ? { warning: delivered.warning } : {}),
     ref,
-    via,
+    via: delivered.via,
     x: at.x,
     y: at.y,
     devicePixelRatio: at.devicePixelRatio,
@@ -411,11 +447,13 @@ async function typeText(params: Record<string, unknown>): Promise<unknown> {
   const at = await reveal(tabId, entry);
   await cursorMove(tabId, at.x, at.y, 'Type', durationOf(params));
   await cursorRipple(tabId);
-  const clickVia = await clickAt(tabId, at.x, at.y, entry.frameId, at.localX, at.localY);
+  const requireTrusted = requiresTrustedInput(params);
+  const clicked = await clickAt(tabId, at.x, at.y, entry.frameId, at.localX, at.localY, requireTrusted);
   await ask(tabId, entry.frameId, 'focus', { ahId: entry.ahId });
   await sleep(40);
   let via: 'trusted' | 'synthetic' = 'trusted';
-  if (clickVia !== 'trusted') {
+  let warning = clicked.warning;
+  if (clicked.via !== 'trusted') {
     via = 'synthetic';
     await setFieldValue(tabId, entry.frameId, entry.ahId, text);
   } else {
@@ -423,19 +461,29 @@ async function typeText(params: Record<string, unknown>): Promise<unknown> {
       await sendCommand(tabId, 'Input.insertText', { text });
     } catch (error) {
       if (!isInputFallbackError(error)) throw error;
+      const reason = inputReason(error);
+      if (requireTrusted) throw trustedInputRequiredError(reason);
       via = 'synthetic';
+      warning = syntheticInputWarning(reason);
       await restoreAttached(tabId);
       await setFieldValue(tabId, entry.frameId, entry.ahId, text);
     }
   }
   if (params.submit === true) {
     await cursorLabel(tabId, 'Submit');
-    await pressEnter(tabId, via);
+    await pressEnter(tabId, via, requireTrusted);
   }
-  return { ref, length: text.length, submitted: params.submit === true, via, clickVia };
+  return {
+    ...(warning ? { warning } : {}),
+    ref,
+    length: text.length,
+    submitted: params.submit === true,
+    via,
+    clickVia: clicked.via,
+  };
 }
 
-async function press(key: string): Promise<unknown> {
+async function press(key: string, requireTrusted = false): Promise<unknown> {
   const tab = await controllableTab();
   const tabId = tab.id as number;
   await focusTab(tab);
@@ -448,9 +496,11 @@ async function press(key: string): Promise<unknown> {
     return { key: parsed.key, via: 'trusted' };
   } catch (error) {
     if (!isInputFallbackError(error)) throw error;
+    const reason = inputReason(error);
+    if (requireTrusted) throw trustedInputRequiredError(reason);
     await restoreAttached(tabId);
     await deliverSyntheticKey(tabId, parsed);
-    return { key: parsed.key, via: 'synthetic' };
+    return { warning: syntheticInputWarning(reason), key: parsed.key, via: 'synthetic' };
   }
 }
 
@@ -477,9 +527,11 @@ async function scroll(params: Record<string, unknown>): Promise<unknown> {
     return { direction, amount, x: at.x, y: at.y, devicePixelRatio: metrics.devicePixelRatio, via: 'trusted' };
   } catch (error) {
     if (!isInputFallbackError(error)) throw error;
+    const reason = inputReason(error);
+    if (requiresTrustedInput(params)) throw trustedInputRequiredError(reason);
     await restoreAttached(tabId);
     await ask(tabId, 0, 'synthetic-scroll', { x: at.x, y: at.y, deltaX: delta.x, deltaY: delta.y });
-    return { direction, amount, x: at.x, y: at.y, devicePixelRatio: metrics.devicePixelRatio, via: 'synthetic' };
+    return { warning: syntheticInputWarning(reason), direction, amount, x: at.x, y: at.y, devicePixelRatio: metrics.devicePixelRatio, via: 'synthetic' };
   }
 }
 
@@ -490,14 +542,47 @@ async function screenshot(): Promise<unknown> {
   await ensureReady(tabId);
   await sleep(80);
   if (tab.windowId == null) throw new Error('tab has no window');
+  const metrics = await ask<Metrics>(tabId, 0, 'metrics').catch(() => ({ cssWidth: 0, cssHeight: 0, devicePixelRatio: 1 }));
+  if (attached.has(tabId)) {
+    try {
+      const captured = await captureViewportPng(tabId, metrics);
+      return { ...captured, cssWidth: metrics.cssWidth, cssHeight: metrics.cssHeight, via: 'cdp' };
+    } catch {
+      // DevTools or a dropped debugger: the visible-tab image is the fallback.
+    }
+  }
   const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
-  const metrics = await ask<Metrics>(tabId, 0, 'metrics');
+  const base64 = dataUrl.replace(/^data:image\/png;base64,/, '');
+  const size = pngDimensionsFromBase64(base64);
+  const report = size
+    ? screenshotScaleReport(size, metrics.cssWidth, metrics.cssHeight, metrics.devicePixelRatio)
+    : { devicePixelRatio: metrics.devicePixelRatio };
   return {
-    base64: dataUrl.replace(/^data:image\/png;base64,/, ''),
-    devicePixelRatio: metrics.devicePixelRatio,
+    base64,
     cssWidth: metrics.cssWidth,
     cssHeight: metrics.cssHeight,
+    via: 'visible-tab',
+    ...report,
   };
+}
+
+async function captureViewportPng(
+  tabId: number,
+  metrics: Metrics,
+): Promise<{ base64: string; devicePixelRatio: number; warning?: string }> {
+  const first = await shootViewport(tabId, metrics, 1);
+  const size = pngDimensionsFromBase64(first);
+  if (!size) return { base64: first, devicePixelRatio: metrics.devicePixelRatio };
+  const again = nextScreenshotScale(size, metrics.cssWidth, metrics.cssHeight, metrics.devicePixelRatio);
+  const base64 = again.retry ? await shootViewport(tabId, metrics, again.scale) : first;
+  const finalSize = pngDimensionsFromBase64(base64) ?? size;
+  return { base64, ...screenshotScaleReport(finalSize, metrics.cssWidth, metrics.cssHeight, metrics.devicePixelRatio) };
+}
+
+async function shootViewport(tabId: number, metrics: Metrics, scale: number): Promise<string> {
+  const shot = await sendCommand(tabId, 'Page.captureScreenshot', viewportScreenshotParams(metrics, scale), 15000) as { data?: string };
+  if (!shot?.data) throw new Error('screenshot payload was empty');
+  return shot.data;
 }
 
 async function getText(max: number): Promise<unknown> {
@@ -692,13 +777,72 @@ function relevantFrames(frames: FrameInfo[]): FrameInfo[] {
   return [...main, ...rest];
 }
 
+async function holdEmulation(tabId: number): Promise<void> {
+  await recallEmulation();
+  if (!activeEmulation) return;
+  try {
+    await attachSettled(tabId);
+    if (lastAttachProblem) return;
+    const metrics = await ask<Metrics>(tabId, 0, 'metrics');
+    if (!viewportMatches(activeEmulation, metrics)) await sendEmulation(tabId, activeEmulation);
+  } catch {
+    // Snapshot still reports the viewport the page actually has.
+  }
+}
+
+async function sendEmulation(tabId: number, spec: EmulationSpec): Promise<void> {
+  await sendCommand(tabId, 'Emulation.setDeviceMetricsOverride', deviceMetricsOverride(spec), 5000);
+  await sendCommand(tabId, 'Emulation.setTouchEmulationEnabled', {
+    enabled: spec.mobile,
+    maxTouchPoints: spec.mobile ? 5 : 1,
+  }, 5000);
+  if (spec.userAgent) {
+    await sendCommand(tabId, 'Emulation.setUserAgentOverride', { userAgent: spec.userAgent }, 5000);
+  }
+  touchEmulated = spec.mobile;
+}
+
+async function persistEmulation(spec: EmulationSpec | null): Promise<void> {
+  activeEmulation = spec;
+  try {
+    await chrome.storage.session.set({ emulation: spec });
+  } catch {
+    // session storage can be unavailable
+  }
+}
+
+async function recallEmulation(): Promise<void> {
+  if (activeEmulation) return;
+  try {
+    const stored = await chrome.storage.session.get('emulation');
+    const value = stored.emulation;
+    if (!value || typeof value !== 'object') return;
+    const spec = value as EmulationSpec;
+    if (typeof spec.width !== 'number' || typeof spec.height !== 'number') return;
+    activeEmulation = spec;
+  } catch {
+    // ignore
+  }
+}
+
+function inputReason(error: unknown): string {
+  const reason = error instanceof Error ? error.message : String(error);
+  if (lastAttachProblem && !reason.includes(lastAttachProblem)) return `${lastAttachProblem}; ${reason}`;
+  return reason;
+}
+
 async function attachSettled(tabId: number): Promise<void> {
+  await recallEmulation();
   if (attached.has(tabId)) return;
+  lastAttachProblem = '';
   try {
     await debuggerAttach(tabId);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (!/already attached/i.test(message)) throw new Error(message);
+    // DevTools (docked or undocked) already owns the tab. Input.* will be
+    // refused immediately with "not attached"; it does not wait 2.5s.
+    lastAttachProblem = message;
   }
   for (const other of [...attached]) {
     if (other !== tabId) await detach(other);
@@ -706,6 +850,14 @@ async function attachSettled(tabId: number): Promise<void> {
   attached.add(tabId);
   await sleep(300);
   await enableMonitoring(tabId);
+  if (!activeEmulation) return;
+  try {
+    await sendEmulation(tabId, activeEmulation);
+    lastAttachProblem = '';
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!lastAttachProblem) lastAttachProblem = message;
+  }
 }
 
 function debuggerAttach(tabId: number): Promise<void> {
@@ -785,19 +937,24 @@ async function clickAt(
   frameId = 0,
   localX = x,
   localY = y,
-): Promise<'trusted' | 'synthetic'> {
+  requireTrusted = false,
+): Promise<{ via: 'trusted' | 'synthetic'; warning?: string }> {
   try {
+    await ask(tabId, frameId, 'arm-click', { x: localX, y: localY }, 1500).catch(() => undefined);
     await mouseClick(tabId, x, y);
-    return 'trusted';
+    lastAttachProblem = '';
+    return { via: 'trusted' };
   } catch (error) {
     if (!isInputFallbackError(error)) throw error;
+    const reason = inputReason(error);
+    if (requireTrusted) throw trustedInputRequiredError(reason);
     await restoreAttached(tabId);
     await ask(tabId, frameId, 'synthetic-click', {
       x: localX,
       y: localY,
       pointerType: touchEmulated ? 'touch' : 'mouse',
     });
-    return 'synthetic';
+    return { via: 'synthetic', warning: syntheticInputWarning(reason) };
   }
 }
 
@@ -812,8 +969,8 @@ async function clickXY(params: Record<string, unknown>): Promise<unknown> {
   await attachSettled(tabId);
   await cursorMove(tabId, x, y, 'Click', durationOf(params));
   await cursorRipple(tabId);
-  const via = await clickAt(tabId, x, y);
-  return { x, y, via };
+  const delivered = await clickAt(tabId, x, y, 0, x, y, requiresTrustedInput(params));
+  return { ...(delivered.warning ? { warning: delivered.warning } : {}), x, y, via: delivered.via };
 }
 
 async function locateText(text: string): Promise<unknown> {
@@ -829,9 +986,10 @@ async function setFieldValue(tabId: number, frameId: number, ahId: string, text:
   if (!ok) throw new Error('could not set the field value');
 }
 
-async function pressEnter(tabId: number, via: 'trusted' | 'synthetic'): Promise<void> {
+async function pressEnter(tabId: number, via: 'trusted' | 'synthetic', requireTrusted: boolean): Promise<void> {
   const enter = parseKeyCombo('Enter');
   if (via !== 'trusted') {
+    if (requireTrusted) throw trustedInputRequiredError('click was not trusted');
     await deliverSyntheticKey(tabId, enter);
     return;
   }
@@ -839,6 +997,7 @@ async function pressEnter(tabId: number, via: 'trusted' | 'synthetic'): Promise<
     await keyDownUp(tabId, enter);
   } catch (error) {
     if (!isInputFallbackError(error)) throw error;
+    if (requireTrusted) throw trustedInputRequiredError(inputReason(error));
     await restoreAttached(tabId);
     await deliverSyntheticKey(tabId, enter);
   }
@@ -864,37 +1023,158 @@ async function emulate(params: Record<string, unknown>): Promise<unknown> {
   const tabId = tab.id as number;
   await focusTab(tab);
   await ensureReady(tabId);
-  await attachSettled(tabId);
   const spec = resolveEmulation(params);
+  const fit = wantsFitWindow(params);
   if (spec.preset === 'off') {
+    activeEmulation = null;
     touchEmulated = false;
-    await sendCommand(tabId, 'Emulation.clearDeviceMetricsOverride', {}, 5000);
-    await sendCommand(tabId, 'Emulation.setTouchEmulationEnabled', { enabled: false }, 5000);
-    await sendCommand(tabId, 'Emulation.setUserAgentOverride', { userAgent: '' }, 5000).catch(() => undefined);
-    return { preset: 'off', touch: false };
+    await persistEmulation(null);
+    await attachSettled(tabId);
+    const result = await applyEmulation(spec, {
+      send: (method, commandParams) => sendCommand(tabId, method, commandParams, 5000),
+      readViewport: () => ask<Metrics>(tabId, 0, 'metrics'),
+    });
+    const restored = await restoreFitIfSaved();
+    return { ...result, ...restored };
   }
-  await sendCommand(tabId, 'Emulation.setDeviceMetricsOverride', {
-    width: spec.width,
-    height: spec.height,
-    deviceScaleFactor: spec.deviceScaleFactor,
-    mobile: spec.mobile,
-  }, 5000);
-  await sendCommand(tabId, 'Emulation.setTouchEmulationEnabled', {
-    enabled: spec.mobile,
-    maxTouchPoints: spec.mobile ? 5 : 1,
-  }, 5000);
-  if (spec.userAgent) {
-    await sendCommand(tabId, 'Emulation.setUserAgentOverride', { userAgent: spec.userAgent }, 5000);
-  }
-  touchEmulated = spec.mobile;
-  return {
-    preset: spec.preset,
-    width: spec.width,
-    height: spec.height,
-    deviceScaleFactor: spec.deviceScaleFactor,
-    mobile: spec.mobile,
-    touch: spec.mobile,
+  const apply = async () => {
+    await attachSettled(tabId);
+    const result = await applyEmulation(spec, {
+      send: (method, commandParams) => sendCommand(tabId, method, commandParams, 5000),
+      readViewport: () => ask<Metrics>(tabId, 0, 'metrics'),
+    });
+    activeEmulation = spec;
+    touchEmulated = spec.mobile && result.applied !== false;
+    await persistEmulation(spec);
+    return result;
   };
+  if (!fit || tab.windowId == null) return apply();
+  const windowId = tab.windowId;
+  const existing = await loadSavedFit();
+  if (existing && existing.windowId !== windowId) await restoreFitIfSaved();
+  const kept = existing && existing.windowId === windowId ? stripWindowId(existing) : null;
+  if (attached.has(tabId)) {
+    try {
+      await sendCommand(tabId, 'Emulation.clearDeviceMetricsOverride', {}, 5000);
+      await sendCommand(tabId, 'Emulation.setTouchEmulationEnabled', { enabled: false }, 5000);
+    } catch {
+      // The next read still reports whatever viewport the page actually has.
+    }
+  }
+  await persistEmulation(null);
+  const note = { infobar: 0 };
+  const fitted = await runFittedEmulation(fitController(windowId, tabId, note), kept, spec, apply);
+  if (note.infobar > 0) fitted.infobarHeight = note.infobar;
+  if (fitted.fitWindow === true && !kept && isWindowBox(fitted.restoreWindow)) {
+    await storeFit(windowId, fitted.restoreWindow);
+  }
+  return fitted;
+}
+
+type PageChrome = {
+  outerWidth: number;
+  outerHeight: number;
+  innerWidth: number;
+  innerHeight: number;
+  devicePixelRatio: number;
+};
+
+function fitController(windowId: number, tabId: number, note: { infobar: number }) {
+  return {
+    getWindow: async () => boxFromChrome(await chrome.windows.get(windowId)),
+    setWindow: async (update: Partial<WindowBox>) => {
+      await chrome.windows.update(windowId, {
+        ...(update.state ? { state: update.state } : {}),
+        ...(update.left != null ? { left: Math.round(update.left) } : {}),
+        ...(update.top != null ? { top: Math.round(update.top) } : {}),
+        ...(update.width != null ? { width: Math.round(update.width) } : {}),
+        ...(update.height != null ? { height: Math.round(update.height) } : {}),
+      });
+    },
+    measure: async () => {
+      const wasAttached = attached.has(tabId);
+      const before = wasAttached ? null : await ask<PageChrome>(tabId, 0, 'window-chrome');
+      await attachSettled(tabId);
+      const after = await ask<PageChrome>(tabId, 0, 'window-chrome');
+      if (before) note.infobar = Math.max(0, Math.round(before.innerHeight - after.innerHeight));
+      const win = await chrome.windows.get(windowId);
+      // innerHeight here is after the infobar, so outer-inner already includes that bar.
+      return {
+        outerWidth: after.outerWidth,
+        outerHeight: after.outerHeight,
+        innerWidth: after.innerWidth,
+        innerHeight: after.innerHeight,
+        devicePixelRatio: after.devicePixelRatio || 1,
+        windowWidth: win.width ?? after.outerWidth,
+        windowHeight: win.height ?? after.outerHeight,
+      };
+    },
+  };
+}
+
+function boxFromChrome(win: chrome.windows.Window): WindowBox {
+  return {
+    left: win.left ?? 0,
+    top: win.top ?? 0,
+    width: win.width ?? 0,
+    height: win.height ?? 0,
+    state: asWindowState(win.state),
+  };
+}
+
+function asWindowState(state: string | undefined): WindowState {
+  if (state === 'minimized' || state === 'maximized' || state === 'fullscreen' || state === 'locked-fullscreen') return state;
+  return 'normal';
+}
+
+function isWindowBox(value: unknown): value is WindowBox {
+  if (!value || typeof value !== 'object') return false;
+  const box = value as WindowBox;
+  return typeof box.width === 'number' && typeof box.height === 'number' && typeof box.state === 'string';
+}
+
+function stripWindowId(saved: WindowBox & { windowId: number }): WindowBox {
+  return { left: saved.left, top: saved.top, width: saved.width, height: saved.height, state: saved.state };
+}
+
+async function loadSavedFit(): Promise<(WindowBox & { windowId: number }) | null> {
+  if (savedFit) return savedFit;
+  try {
+    const stored = await chrome.storage.session.get('fitWindow');
+    const value = stored.fitWindow;
+    if (!isWindowBox(value) || typeof (value as { windowId?: unknown }).windowId !== 'number') return null;
+    savedFit = value as WindowBox & { windowId: number };
+    return savedFit;
+  } catch {
+    return null;
+  }
+}
+
+async function storeFit(windowId: number, box: WindowBox): Promise<void> {
+  savedFit = { ...box, windowId };
+  try {
+    await chrome.storage.session.set({ fitWindow: savedFit });
+  } catch {
+    // session storage can be unavailable; the in-memory copy still restores
+  }
+}
+
+async function restoreFitIfSaved(): Promise<Record<string, unknown>> {
+  const saved = await loadSavedFit();
+  if (!saved) return {};
+  try {
+    await restoreFittedWindow(fitController(saved.windowId, 0, { infobar: 0 }), stripWindowId(saved));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { warning: `Could not restore the Chrome window (${message}).` };
+  }
+  savedFit = null;
+  try {
+    await chrome.storage.session.remove('fitWindow');
+  } catch {
+    // the in-memory copy is already cleared
+  }
+  return { restoredWindow: stripWindowId(saved) };
 }
 
 async function readConsole(params: Record<string, unknown>): Promise<unknown> {
@@ -1135,6 +1415,7 @@ function publicItem(item: SnapshotItem): Omit<SnapshotItem, 'ahId'> {
     width: item.width,
     height: item.height,
     disabled: item.disabled,
+    ...(item.checked == null ? {} : { checked: item.checked }),
   };
 }
 

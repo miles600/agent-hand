@@ -50,6 +50,21 @@ test('snapshot orders by position and assigns stable refs', () => {
   assert.equal(built.items[1].frameId, 1);
 });
 
+test('snapshot reports checkbox and radio state', () => {
+  const built = buildSnapshot(
+    [
+      element({ ahId: 'c', role: 'checkbox', name: 'Agree', x: 1, y: 1, checked: true }),
+      element({ ahId: 'r', role: 'radio', name: 'No', x: 1, y: 30, checked: false }),
+      element({ ahId: 'm', role: 'checkbox', name: 'Some', x: 1, y: 60, checked: 'mixed' }),
+    ],
+    { cssWidth: 100, cssHeight: 100, devicePixelRatio: 1 },
+  );
+  assert.match(built.text, /checkbox "Agree" \(1,1 40x20\) checked/);
+  assert.match(built.text, /radio "No" \(1,30 40x20\) unchecked/);
+  assert.match(built.text, /checkbox "Some" \(1,60 40x20\) mixed/);
+  assert.equal(built.items[0].checked, true);
+});
+
 test('snapshot caps the list and keeps the viewport line', () => {
   const raw = Array.from({ length: MAX_SNAPSHOT_ITEMS + 3 }, (_, index) =>
     element({ ahId: `e${index}`, name: `Item ${index}`, x: index, y: index }));

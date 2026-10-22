@@ -46,17 +46,18 @@ export const TOOLS: Tool[] = [
   {
     name: 'snapshot',
     description:
-      'List visible interactive elements. Each line starts with a numeric ref. Refs stay valid until the next snapshot. Boxes are CSS pixels: x,y widthxheight. "frame" marks an element inside an iframe. Multiply by devicePixelRatio to map a box onto a screenshot.',
+      'List visible interactive elements. The first line is the effective viewport in CSS pixels, for example "viewport 390x844 dpr 3". Use that line to verify emulate. Each later line starts with a numeric ref. Refs stay valid until the next snapshot. Boxes are CSS pixels: x,y widthxheight. "checked" or "unchecked" is the state of a checkbox, radio, or switch. "frame" marks an element inside an iframe. A uni-app date picker is listed as the clickable wrapper, not as a disabled textbox. Image and card tiles are named from alt text, aria-label, inner text, or a nearby label.',
     inputSchema: empty,
   },
   {
     name: 'click',
     description:
-      'Scroll the ref into view, glide the on-screen agent cursor to its center, then send a trusted left click through the Chrome debugger.',
+      'Scroll the ref into view, glide the on-screen agent cursor to its center, then send a trusted left click through the Chrome debugger. If DevTools is open (docked or undocked) the click is synthetic and the result includes a warning: isTrusted is false. Pass requireTrusted:true, or set AGENT_HAND_REQUIRE_TRUSTED / --require-trusted, to fail instead of falling back. Close DevTools and use emulate for a trusted phone click.',
     inputSchema: {
       type: 'object',
       properties: {
         ref: { type: 'integer', description: 'Ref from the latest snapshot.' },
+        requireTrusted: { type: 'boolean', description: 'Fail if the click cannot be trusted. DevTools must be closed.' },
       },
       required: ['ref'],
       additionalProperties: false,
@@ -72,6 +73,7 @@ export const TOOLS: Tool[] = [
         ref: { type: 'integer' },
         text: { type: 'string' },
         submit: { type: 'boolean' },
+        requireTrusted: { type: 'boolean', description: 'Fail if the click or typing cannot be trusted. DevTools must be closed.' },
       },
       required: ['ref', 'text'],
       additionalProperties: false,
@@ -79,11 +81,12 @@ export const TOOLS: Tool[] = [
   },
   {
     name: 'press',
-    description: 'Send a trusted key chord, for example Enter, Tab, Escape, ArrowDown, Ctrl+A, or Shift+Tab.',
+    description: 'Send a trusted key chord, for example Enter, Tab, Escape, ArrowDown, Ctrl+A, or Shift+Tab. Falls back to a synthetic key when DevTools is open unless requireTrusted is set.',
     inputSchema: {
       type: 'object',
       properties: {
         key: { type: 'string' },
+        requireTrusted: { type: 'boolean' },
       },
       required: ['key'],
       additionalProperties: false,
@@ -99,6 +102,7 @@ export const TOOLS: Tool[] = [
         direction: { type: 'string', enum: ['up', 'down', 'left', 'right'] },
         ref: { type: 'integer' },
         amount: { type: 'integer', description: 'Wheel delta in pixels. Default 480.' },
+        requireTrusted: { type: 'boolean' },
       },
       additionalProperties: false,
     },
@@ -106,7 +110,7 @@ export const TOOLS: Tool[] = [
   {
     name: 'screenshot',
     description:
-      'Capture the visible tab to a PNG file and return its path. Image pixels are CSS pixels times devicePixelRatio. The agent cursor is part of the page, so it appears in the image.',
+      'Capture a PNG of the page. When the debugger is attached the image is the emulated viewport (cssWidth times devicePixelRatio by cssHeight times devicePixelRatio), not the white margin around it. Otherwise it is the visible tab, and devicePixelRatio is the scale of that image. The agent cursor is part of the page, so it appears in the image.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -148,6 +152,7 @@ export const TOOLS: Tool[] = [
         x: { type: 'number' },
         y: { type: 'number' },
         duration: { type: 'integer' },
+        requireTrusted: { type: 'boolean', description: 'Fail if the click cannot be trusted. DevTools must be closed.' },
       },
       required: ['x', 'y'],
       additionalProperties: false,
@@ -168,15 +173,17 @@ export const TOOLS: Tool[] = [
   {
     name: 'emulate',
     description:
-      'Override the viewport for mobile H5. preset is iphone, pixel, or off. Or pass width and height in CSS px. Touch emulation is turned on for mobile presets.',
+      'Phone viewport via chrome.debugger Emulation (mobile + touch), same idea as DevTools device mode. preset: iphone (390x844 @3), pixel (412x915 @2.625), or off. Or size "390x844" or "390x844@3" (CSS px, optional device pixel ratio; default 2). Custom sizes turn on mobile and touch. The result includes cssWidth, cssHeight, devicePixelRatio read back from the page, and applied:true when they match. snapshot\'s first line repeats the effective viewport. Close DevTools first: the extension cannot toggle the device toolbar, and opening DevTools clears this override. With DevTools closed the size sticks and clicks stay trusted. With DevTools open, emulate does not stick and clicks are synthetic. fitWindow:true resizes the real Chrome window (and every other tab in it) so the content area matches the emulated CSS size. It accounts for display scaling and the debugger infobar, then emulate off restores the previous bounds.',
     inputSchema: {
       type: 'object',
       properties: {
-        preset: { type: 'string', enum: ['iphone', 'pixel', 'off'] },
+        preset: { type: 'string', description: 'iphone, pixel, off, or a size such as 390x844 or 390x844@3.' },
+        size: { type: 'string', description: 'Exact CSS size, for example 390x844 or 390x844@3.' },
         width: { type: 'integer' },
         height: { type: 'integer' },
-        deviceScaleFactor: { type: 'number' },
-        mobile: { type: 'boolean' },
+        deviceScaleFactor: { type: 'number', description: 'Device pixel ratio. Default 2. Use 3 for 390x844@3.' },
+        mobile: { type: 'boolean', description: 'Default true. Turns on touch emulation and a mobile user agent.' },
+        fitWindow: { type: 'boolean', description: 'Resize the real Chrome window so its content matches the emulated CSS size. Also restores that window on preset off. Default false: the window is not moved.' },
       },
       additionalProperties: false,
     },

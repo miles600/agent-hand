@@ -8,6 +8,7 @@ import { homeDir } from './config.js';
 import type { Hand } from './client.js';
 import { DirectSession } from './direct.js';
 import { materializeScreenshot } from './screenshot.js';
+import { TRUSTED_INPUT_METHODS } from '../shared/input.js';
 import { sleep } from '../shared/sleep.js';
 import { normalizeCall } from '../shared/validate.js';
 
@@ -30,6 +31,8 @@ export type BridgeOptions = {
   demoDir?: string;
   screenshotDir?: string;
   authTimeoutMs?: number;
+  /** When true, click/type/press/scroll/click_xy fail instead of synthetic input. */
+  requireTrusted?: boolean;
 };
 
 export function defaultDemoDir(): string {
@@ -46,6 +49,8 @@ export async function startBridge(options: BridgeOptions): Promise<BridgeHandle>
   const pending = new Map<string, Waiter>();
   let chain: Promise<void> = Promise.resolve();
   let direct: DirectSession | null = null;
+  let viewport: { cssWidth: number; cssHeight: number; devicePixelRatio: number } | null = null;
+  const requireTrusted = options.requireTrusted === true;
 
   const httpServer = createServer((req, res) => {
     void handleHttp(req, res, {
@@ -55,6 +60,7 @@ export async function startBridge(options: BridgeOptions): Promise<BridgeHandle>
       extensionId: () => extensionId,
       mode: () => (direct ? 'cdp' : 'extension'),
       cdp: () => (direct ? String(direct.status().url ?? '') : ''),
+      viewport: () => viewport,
     });
   });
 
@@ -222,21 +228,39 @@ export async function startBridge(options: BridgeOptions): Promise<BridgeHandle>
     if (direct && DIRECT_METHODS.has(method)) {
       const data = await direct.call(method, params);
       if (method === 'screenshot') {
-        return materializeScreenshot(data, { out: typeof params.out === 'string' ? params.out : undefined, dir: screenshotDir });
+        const saved = await materializeScreenshot(data, { out: typeof params.out === 'string' ? params.out : undefined, dir: screenshotDir });
+        noteViewport(saved);
+        return saved;
       }
+      noteViewport(data);
       return data;
     }
     const data = await forward(method, params, timeoutMs);
     if (method === 'screenshot') {
-      return materializeScreenshot(data, { out: typeof params.out === 'string' ? params.out : undefined, dir: screenshotDir });
+      const saved = await materializeScreenshot(data, { out: typeof params.out === 'string' ? params.out : undefined, dir: screenshotDir });
+      noteViewport(saved);
+      return saved;
     }
+    noteViewport(data);
     return data;
+  }
+
+  function noteViewport(data: unknown): void {
+    if (!data || typeof data !== 'object') return;
+    const record = data as Record<string, unknown>;
+    const cssWidth = record.cssWidth;
+    const cssHeight = record.cssHeight;
+    const devicePixelRatio = record.devicePixelRatio;
+    if (typeof cssWidth !== 'number' || typeof cssHeight !== 'number' || typeof devicePixelRatio !== 'number') return;
+    viewport = { cssWidth, cssHeight, devicePixelRatio };
   }
 
   function call(method: string, rawParams?: Record<string, unknown>, timeoutMs?: number): Promise<unknown> {
     let normalized: { method: string; params: Record<string, unknown> };
+    const raw = { ...(rawParams ?? {}) };
+    if (requireTrusted && TRUSTED_INPUT_METHODS.has(method)) raw.requireTrusted = true;
     try {
-      normalized = normalizeCall(method, rawParams);
+      normalized = normalizeCall(method, raw);
     } catch (error) {
       return Promise.reject(error instanceof Error ? error : new Error(String(error)));
     }
@@ -323,6 +347,7 @@ async function handleHttp(
     extensionId: () => string;
     mode: () => string;
     cdp: () => string;
+    viewport: () => { cssWidth: number; cssHeight: number; devicePixelRatio: number } | null;
   },
 ): Promise<void> {
   if (req.method !== 'GET' && req.method !== 'HEAD') {
@@ -339,6 +364,7 @@ async function handleHttp(
       mode: ctx.mode(),
       cdp: ctx.cdp(),
       port: ctx.port,
+      viewport: ctx.viewport(),
     });
     res.writeHead(200, {
       'content-type': 'application/json; charset=utf-8',

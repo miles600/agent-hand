@@ -30,7 +30,9 @@ test('bridge auth, queue, screenshot file, and demo page', async () => {
   assert.equal(server.host, '127.0.0.1');
   try {
     const health = await fetch(`http://127.0.0.1:${server.port}/health`);
-    assert.equal((await health.json()).extension, false);
+    const healthBody = await health.json() as { extension: boolean; viewport: unknown };
+    assert.equal(healthBody.extension, false);
+    assert.equal(healthBody.viewport, null);
     const demo = await fetch(`http://127.0.0.1:${server.port}/demo`);
     const html = await demo.text();
     assert.match(html, /isTrusted/);
@@ -76,6 +78,39 @@ test('bridge auth, queue, screenshot file, and demo page', async () => {
     assert.equal(shot.height, 1);
     const bytes = await readFile(shot.path);
     assert.equal(bytes[0], 137);
+    const after = await (await fetch(`http://127.0.0.1:${server.port}/health`)).json() as { viewport: unknown };
+    assert.deepEqual(after.viewport, { cssWidth: 100, cssHeight: 50, devicePixelRatio: 2 });
+    client.close();
+    extension.close();
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a bridge started with requireTrusted forwards it on click', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'agent-hand-server-'));
+  const server = await startBridge({
+    port: 0,
+    token: TOKEN,
+    demoDir: join(process.cwd(), 'demo'),
+    screenshotDir: dir,
+    requireTrusted: true,
+  });
+  try {
+    const extension = await connectExtension(server.port);
+    const seen: Record<string, unknown>[] = [];
+    extension.on('message', (data) => {
+      const msg = JSON.parse(data.toString()) as { type?: string; id?: string; params?: Record<string, unknown> };
+      if (msg.type !== 'command' || !msg.id) return;
+      seen.push(msg.params ?? {});
+      extension.send(JSON.stringify({ type: 'result', id: msg.id, ok: true, data: { ok: true } }));
+    });
+    const client = await BridgeClient.connect(server.port, TOKEN);
+    await client.call('click', { ref: 3 });
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].ref, 3);
+    assert.equal(seen[0].requireTrusted, true);
     client.close();
     extension.close();
   } finally {

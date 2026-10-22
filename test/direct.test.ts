@@ -28,16 +28,18 @@ test('direct CDP session falls back without closing the app', async () => {
       const snap = await session.call('snapshot', {}) as { text: string; items: { ref: number; name: string }[] };
       assert.match(snap.text, /Save/);
       assert.match(snap.text, /Name/);
-      const clicked = await session.call('click_xy', { x: 12, y: 20, duration: 0 }) as { via: string };
+      const clicked = await session.call('click_xy', { x: 12, y: 20, duration: 0 }) as { via: string; warning?: string };
       assert.equal(clicked.via, 'synthetic');
+      assert.match(clicked.warning ?? '', /DevTools/);
       assert.equal(mock.openSockets(), 1);
       const typed = await session.call('type', { ref: snap.items.find((item) => item.name === 'Name')?.ref, text: 'Ada' }) as { via: string; clickVia: string };
       assert.equal(typed.clickVia, 'synthetic');
       assert.equal(typed.via, 'synthetic');
       assert.equal(mock.seen.includes('Input.insertText'), false);
       assert.ok(mock.expressions.some((expression) => expression.includes('api["setValue"]')));
-      const pressed = await session.call('press', { key: 'Enter' }) as { via: string };
+      const pressed = await session.call('press', { key: 'Enter' }) as { via: string; warning?: string };
       assert.equal(pressed.via, 'synthetic');
+      assert.match(pressed.warning ?? '', /DevTools/);
       assert.ok(mock.expressions.some((expression) => expression.includes('api["syntheticKey"]')));
       const scrolled = await session.call('scroll', { direction: 'down', amount: 100 }) as { via: string };
       assert.equal(scrolled.via, 'synthetic');
@@ -47,13 +49,43 @@ test('direct CDP session falls back without closing the app', async () => {
       assert.ok(network.errors.some((error) => error.status === 404));
       assert.ok(network.errors.some((error) => error.status === 0 && error.url.includes('/api')));
       assert.equal(network.errors.some((error) => error.url.includes('/ok')), false);
-      const emulated = await session.call('emulate', { preset: 'iphone' }) as { width: number; touch: boolean };
+      const nameRef = snap.items.find((item) => item.name === 'Name')?.ref;
+      const syntheticClicks = () => mock.expressions.filter((expression) => expression.includes('syntheticClick')).length;
+      const beforeTrusted = syntheticClicks();
+      await assert.rejects(
+        () => session.call('click_xy', { x: 12, y: 20, duration: 0, requireTrusted: true }),
+        /Trusted input required[\s\S]*DevTools[\s\S]*Synthetic input was not sent/,
+      );
+      await assert.rejects(
+        () => session.call('type', { ref: nameRef, text: 'nope', requireTrusted: true }),
+        /Trusted input required[\s\S]*DevTools/,
+      );
+      await assert.rejects(
+        () => session.call('press', { key: 'Enter', requireTrusted: true }),
+        /Trusted input required[\s\S]*DevTools/,
+      );
+      assert.equal(syntheticClicks(), beforeTrusted);
+      const emulated = await session.call('emulate', { preset: 'iphone' }) as {
+        width: number;
+        touch: boolean;
+        applied: boolean;
+        cssWidth: number;
+        cssHeight: number;
+      };
       assert.equal(emulated.width, 390);
       assert.equal(emulated.touch, true);
+      assert.equal(emulated.applied, true);
+      assert.equal(emulated.cssWidth, 390);
+      assert.equal(emulated.cssHeight, 844);
       assert.ok(mock.seen.includes('Emulation.setDeviceMetricsOverride'));
       assert.equal(mock.seen.includes('Page.navigate'), false);
       const shot = await session.call('screenshot', {}) as { base64: string };
       assert.equal(shot.base64, PNG.toString('base64'));
+      const clip = mock.captures[0] as { captureBeyondViewport?: boolean; clip?: { width: number; height: number; scale: number } };
+      assert.equal(clip.captureBeyondViewport, false);
+      assert.equal(clip.clip?.width, 390);
+      assert.equal(clip.clip?.height, 844);
+      assert.equal(clip.clip?.scale, 1);
       await assert.rejects(() => mock.connectAndForbid(), /does not close/);
       assert.equal(mock.seen.includes('Browser.close'), false);
       assert.equal(mock.seen.includes('Target.closeTarget'), false);
@@ -112,6 +144,7 @@ type Mock = {
   origin: string;
   seen: string[];
   expressions: string[];
+  captures: Record<string, unknown>[];
   openSockets: () => number;
   connectAndForbid: () => Promise<void>;
   close: () => Promise<void>;
@@ -120,13 +153,14 @@ type Mock = {
 async function startMock(options: { hangInput: boolean }): Promise<Mock> {
   const seen: string[] = [];
   const expressions: string[] = [];
+  const captures: Record<string, unknown>[] = [];
   const sockets = new Set<WebSocket>();
   const http = createServer((req, res) => handle(req, res, () => address(http)));
   const wss = new WebSocketServer({ server: http });
   wss.on('connection', (socket) => {
     sockets.add(socket);
     socket.on('close', () => sockets.delete(socket));
-    socket.on('message', (data) => onCdp(socket, data.toString(), seen, expressions, options.hangInput));
+    socket.on('message', (data) => onCdp(socket, data.toString(), seen, expressions, captures, options.hangInput));
   });
   await new Promise<void>((resolve) => http.listen(0, '127.0.0.1', () => resolve()));
   const port = address(http).port;
@@ -134,6 +168,7 @@ async function startMock(options: { hangInput: boolean }): Promise<Mock> {
     origin: `http://127.0.0.1:${port}`,
     seen,
     expressions,
+    captures,
     openSockets: () => [...sockets].filter((socket) => socket.readyState === 1).length,
     connectAndForbid: async () => {
       const connection = await CdpConnection.connect(`ws://127.0.0.1:${port}/devtools/page/TARGET1`);
@@ -182,9 +217,17 @@ function handle(req: IncomingMessage, res: ServerResponse, origin: () => Address
   res.end('not found');
 }
 
-function onCdp(socket: WebSocket, raw: string, seen: string[], expressions: string[], hangInput: boolean): void {
+function onCdp(
+  socket: WebSocket,
+  raw: string,
+  seen: string[],
+  expressions: string[],
+  captures: Record<string, unknown>[],
+  hangInput: boolean,
+): void {
   const msg = JSON.parse(raw) as { id?: number; method?: string; params?: { expression?: string } };
   if (msg.method) seen.push(msg.method);
+  if (msg.method === 'Page.captureScreenshot') captures.push((msg.params ?? {}) as Record<string, unknown>);
   if (msg.id == null || !msg.method) return;
   if (hangInput && msg.method.startsWith('Input.')) return;
   if (msg.method === 'Runtime.enable') {
