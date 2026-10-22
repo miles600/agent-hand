@@ -11,6 +11,9 @@ export type SavedScreenshot = {
   cssWidth: number;
   cssHeight: number;
   note: string;
+  warning?: string;
+  /** cdp when the debugger captured the emulated viewport; visible-tab is the fallback. */
+  via?: string;
 };
 
 export function pngSize(buffer: Buffer): { width: number; height: number } {
@@ -42,7 +45,7 @@ export async function materializeScreenshot(
     : join(options.dir, `shot-${new Date().toISOString().replace(/[:.]/g, '-')}.png`);
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   await writeFile(path, buffer, { mode: 0o600 });
-  return {
+  const saved: SavedScreenshot = {
     path,
     width: size.width,
     height: size.height,
@@ -51,6 +54,9 @@ export async function materializeScreenshot(
     cssHeight: numberOr(record.cssHeight, 0),
     note: 'Bounding boxes from snapshot are CSS pixels. Multiply by devicePixelRatio to map onto this image.',
   };
+  if (typeof record.warning === 'string' && record.warning) saved.warning = record.warning;
+  if (typeof record.via === 'string' && record.via) saved.via = record.via;
+  return saved;
 }
 
 function numberOr(value: unknown, fallback: number): number {

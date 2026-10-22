@@ -110,7 +110,7 @@ export const TOOLS: Tool[] = [
   {
     name: 'screenshot',
     description:
-      'Capture the visible tab to a PNG file and return its path. Image pixels are CSS pixels times devicePixelRatio. The agent cursor is part of the page, so it appears in the image.',
+      'Capture a PNG of the page. When the debugger is attached the image is the emulated viewport (cssWidth times devicePixelRatio by cssHeight times devicePixelRatio), not the white margin around it. Otherwise it is the visible tab, and devicePixelRatio is the scale of that image. The agent cursor is part of the page, so it appears in the image.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -173,7 +173,7 @@ export const TOOLS: Tool[] = [
   {
     name: 'emulate',
     description:
-      'Phone viewport via chrome.debugger Emulation (mobile + touch), same idea as DevTools device mode. preset: iphone (390x844 @3), pixel (412x915 @2.625), or off. Or size "390x844" or "390x844@3" (CSS px, optional device pixel ratio; default 2). Custom sizes turn on mobile and touch. The result includes cssWidth, cssHeight, devicePixelRatio read back from the page, and applied:true when they match. snapshot\'s first line repeats the effective viewport. Close DevTools first: the extension cannot toggle the device toolbar, and opening DevTools clears this override. With DevTools closed the size sticks and clicks stay trusted. With DevTools open, emulate does not stick and clicks are synthetic.',
+      'Phone viewport via chrome.debugger Emulation (mobile + touch), same idea as DevTools device mode. preset: iphone (390x844 @3), pixel (412x915 @2.625), or off. Or size "390x844" or "390x844@3" (CSS px, optional device pixel ratio; default 2). Custom sizes turn on mobile and touch. The result includes cssWidth, cssHeight, devicePixelRatio read back from the page, and applied:true when they match. snapshot\'s first line repeats the effective viewport. Close DevTools first: the extension cannot toggle the device toolbar, and opening DevTools clears this override. With DevTools closed the size sticks and clicks stay trusted. With DevTools open, emulate does not stick and clicks are synthetic. fitWindow:true resizes the real Chrome window (and every other tab in it) so the content area matches the emulated CSS size. It accounts for display scaling and the debugger infobar, then emulate off restores the previous bounds.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -183,6 +183,7 @@ export const TOOLS: Tool[] = [
         height: { type: 'integer' },
         deviceScaleFactor: { type: 'number', description: 'Device pixel ratio. Default 2. Use 3 for 390x844@3.' },
         mobile: { type: 'boolean', description: 'Default true. Turns on touch emulation and a mobile user agent.' },
+        fitWindow: { type: 'boolean', description: 'Resize the real Chrome window so its content matches the emulated CSS size. Also restores that window on preset off. Default false: the window is not moved.' },
       },
       additionalProperties: false,
     },

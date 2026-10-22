@@ -81,6 +81,11 @@ test('direct CDP session falls back without closing the app', async () => {
       assert.equal(mock.seen.includes('Page.navigate'), false);
       const shot = await session.call('screenshot', {}) as { base64: string };
       assert.equal(shot.base64, PNG.toString('base64'));
+      const clip = mock.captures[0] as { captureBeyondViewport?: boolean; clip?: { width: number; height: number; scale: number } };
+      assert.equal(clip.captureBeyondViewport, false);
+      assert.equal(clip.clip?.width, 390);
+      assert.equal(clip.clip?.height, 844);
+      assert.equal(clip.clip?.scale, 1);
       await assert.rejects(() => mock.connectAndForbid(), /does not close/);
       assert.equal(mock.seen.includes('Browser.close'), false);
       assert.equal(mock.seen.includes('Target.closeTarget'), false);
@@ -139,6 +144,7 @@ type Mock = {
   origin: string;
   seen: string[];
   expressions: string[];
+  captures: Record<string, unknown>[];
   openSockets: () => number;
   connectAndForbid: () => Promise<void>;
   close: () => Promise<void>;
@@ -147,13 +153,14 @@ type Mock = {
 async function startMock(options: { hangInput: boolean }): Promise<Mock> {
   const seen: string[] = [];
   const expressions: string[] = [];
+  const captures: Record<string, unknown>[] = [];
   const sockets = new Set<WebSocket>();
   const http = createServer((req, res) => handle(req, res, () => address(http)));
   const wss = new WebSocketServer({ server: http });
   wss.on('connection', (socket) => {
     sockets.add(socket);
     socket.on('close', () => sockets.delete(socket));
-    socket.on('message', (data) => onCdp(socket, data.toString(), seen, expressions, options.hangInput));
+    socket.on('message', (data) => onCdp(socket, data.toString(), seen, expressions, captures, options.hangInput));
   });
   await new Promise<void>((resolve) => http.listen(0, '127.0.0.1', () => resolve()));
   const port = address(http).port;
@@ -161,6 +168,7 @@ async function startMock(options: { hangInput: boolean }): Promise<Mock> {
     origin: `http://127.0.0.1:${port}`,
     seen,
     expressions,
+    captures,
     openSockets: () => [...sockets].filter((socket) => socket.readyState === 1).length,
     connectAndForbid: async () => {
       const connection = await CdpConnection.connect(`ws://127.0.0.1:${port}/devtools/page/TARGET1`);
@@ -209,9 +217,17 @@ function handle(req: IncomingMessage, res: ServerResponse, origin: () => Address
   res.end('not found');
 }
 
-function onCdp(socket: WebSocket, raw: string, seen: string[], expressions: string[], hangInput: boolean): void {
+function onCdp(
+  socket: WebSocket,
+  raw: string,
+  seen: string[],
+  expressions: string[],
+  captures: Record<string, unknown>[],
+  hangInput: boolean,
+): void {
   const msg = JSON.parse(raw) as { id?: number; method?: string; params?: { expression?: string } };
   if (msg.method) seen.push(msg.method);
+  if (msg.method === 'Page.captureScreenshot') captures.push((msg.params ?? {}) as Record<string, unknown>);
   if (msg.id == null || !msg.method) return;
   if (hangInput && msg.method.startsWith('Input.')) return;
   if (msg.method === 'Runtime.enable') {

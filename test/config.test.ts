@@ -19,8 +19,10 @@ describe('config file permissions and trusted-input flag', { concurrency: 1 }, (
       assert.equal(created.token.length, 64);
       assert.equal(created.port, 17321);
       assert.equal(created.requireTrusted, false);
-      const info = await stat(created.path);
-      assert.equal(info.mode & 0o777, 0o600);
+      if (process.platform !== 'win32') {
+        const info = await stat(created.path);
+        assert.equal(info.mode & 0o777, 0o600);
+      }
       const again = await loadConfig();
       assert.equal(again.created, false);
       assert.equal(again.token, created.token);

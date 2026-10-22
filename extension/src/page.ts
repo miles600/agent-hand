@@ -25,6 +25,8 @@ export type PageApi = {
   scrollFrame: (url: string) => void;
   focus: (ahId: string) => void;
   metrics: () => { cssWidth: number; cssHeight: number; devicePixelRatio: number };
+  /** Real window chrome, read before a device-metrics override replaces innerWidth. */
+  windowChrome: () => { outerWidth: number; outerHeight: number; innerWidth: number; innerHeight: number; devicePixelRatio: number };
   text: () => string;
   pageInfo: () => { href: string; title: string };
   syntheticClick: (x: number, y: number, pointerType?: string) => { tag: string; text: string } | null;
@@ -114,6 +116,7 @@ export function installPageApi(): PageApi {
     scrollFrame,
     focus,
     metrics,
+    windowChrome,
     text,
     pageInfo,
     syntheticClick,
@@ -181,6 +184,7 @@ function collect(): { elements: PageElement[] } {
       add(card, 'clickable', nameForCard(card, img));
     }
   }
+  if (elements.length < MAX_SNAPSHOT_ITEMS) addTabLike(add, seen);
   if (elements.length < MAX_SNAPSHOT_ITEMS && document.body) {
     for (const el of document.body.querySelectorAll('*')) {
       if (elements.length >= MAX_SNAPSHOT_ITEMS) break;
@@ -188,6 +192,7 @@ function collect(): { elements: PageElement[] } {
       if (getComputedStyle(el).cursor !== 'pointer') continue;
       const parent = el.parentElement;
       if (parent && getComputedStyle(parent).cursor === 'pointer') continue;
+      if ([...el.children].some((child) => seen.has(child))) continue;
       const listed = el.closest(SELECTOR);
       if (listed && listed !== el) continue;
       if (!isCandidate(el)) continue;
@@ -277,6 +282,16 @@ function metrics(): { cssWidth: number; cssHeight: number; devicePixelRatio: num
   return {
     cssWidth: window.innerWidth,
     cssHeight: window.innerHeight,
+    devicePixelRatio: window.devicePixelRatio || 1,
+  };
+}
+
+function windowChrome(): { outerWidth: number; outerHeight: number; innerWidth: number; innerHeight: number; devicePixelRatio: number } {
+  return {
+    outerWidth: window.outerWidth,
+    outerHeight: window.outerHeight,
+    innerWidth: window.innerWidth,
+    innerHeight: window.innerHeight,
     devicePixelRatio: window.devicePixelRatio || 1,
   };
 }
@@ -500,6 +515,81 @@ function isCandidate(el: Element): boolean {
   return isVisible(el);
 }
 
+const TAB_SELECTOR = '.uni-tab, .uni-tabbar__item, .tabs-item, .tab-item, .tab';
+
+function addTabLike(
+  add: (el: Element, role?: string, name?: string) => void,
+  seen: Set<Element>,
+): void {
+  for (const el of document.querySelectorAll(TAB_SELECTOR)) {
+    const name = tabLabel(el);
+    if (!name || !canListTab(el, seen)) continue;
+    add(el, 'tab', name);
+  }
+  for (const el of document.querySelectorAll('div, span, li, uni-view, view')) {
+    if (!hasVueClick(el)) continue;
+    const name = tabLabel(el);
+    if (!name || !canListTab(el, seen)) continue;
+    add(el, 'clickable', name);
+  }
+  if (!document.body) return;
+  const parents = new Set<Element>();
+  for (const el of document.body.querySelectorAll('div, uni-view, view')) {
+    if (el.parentElement) parents.add(el.parentElement);
+  }
+  for (const parent of parents) {
+    const row = horizontalTabs(parent);
+    if (!row) continue;
+    for (const el of row) {
+      if (seen.has(el)) continue;
+      const name = tabLabel(el);
+      if (!name) continue;
+      add(el, 'tab', name);
+    }
+  }
+}
+
+function canListTab(el: Element, seen: Set<Element>): boolean {
+  if (seen.has(el) || !isCandidate(el)) return false;
+  if (el.closest(`#${OVERLAY_ID}, button, a[href], [role="button"], uni-button, uni-picker, label`)) return false;
+  if (el.querySelector('input, textarea, select, img, uni-image')) return false;
+  const rect = el.getBoundingClientRect();
+  return rect.height >= 2 && rect.height <= 64 && rect.width >= 2 && rect.width <= 240;
+}
+
+function tabLabel(el: Element): string {
+  const text = clean((el as HTMLElement).innerText || el.textContent || '');
+  if (!text || text.length > 12) return '';
+  return text;
+}
+
+function hasVueClick(el: Element): boolean {
+  const host = el as Element & {
+    __vnode?: { props?: Record<string, unknown> | null };
+    __vue__?: { $listeners?: { click?: unknown } };
+  };
+  if (host.__vue__?.$listeners?.click) return true;
+  const props = host.__vnode?.props;
+  if (!props) return false;
+  return Boolean(props.onClick || props.onClickOnce || props.onTap);
+}
+
+function horizontalTabs(parent: Element): Element[] | null {
+  const kids = [...parent.children].filter((el): el is HTMLElement => el instanceof HTMLElement);
+  if (kids.length < 2 || kids.length > 8) return null;
+  const boxes = kids.map((el) => ({ el, rect: el.getBoundingClientRect(), name: tabLabel(el) }));
+  if (!boxes.every((item) => item.name && item.rect.height >= 2 && item.rect.height <= 64 && item.rect.width <= 240)) return null;
+  if (boxes.some((item) => item.el.querySelector('img, uni-image, input, textarea, select'))) return null;
+  const top = boxes[0].rect.top;
+  if (!boxes.every((item) => Math.abs(item.rect.top - top) <= 12)) return null;
+  for (let index = 1; index < boxes.length; index += 1) {
+    if (boxes[index].rect.left + 4 < boxes[index - 1].rect.left) return null;
+  }
+  if (boxes.some((item) => !isCandidate(item.el))) return null;
+  if (boxes.some((item) => item.el.closest('button, a[href], [role="button"], uni-button, uni-picker, label'))) return null;
+  return boxes.map((item) => item.el);
+}
+
 function isVisible(el: Element): boolean {
   if (!(el instanceof HTMLElement) && !(el instanceof SVGElement)) return false;
   const style = getComputedStyle(el);
@@ -711,7 +801,10 @@ function isClickableHint(el: Element): boolean {
   if (el.hasAttribute('onclick')) return true;
   const role = el.getAttribute('role');
   if (role === 'button' || role === 'link') return true;
-  return el instanceof HTMLElement && getComputedStyle(el).cursor === 'pointer';
+  if (!(el instanceof HTMLElement) || getComputedStyle(el).cursor !== 'pointer') return false;
+  // cursor inherits. A child of a pointer card is not its own target.
+  const parent = el.parentElement;
+  return !parent || getComputedStyle(parent).cursor !== 'pointer';
 }
 
 function clickableHintAncestor(el: Element): Element | null {

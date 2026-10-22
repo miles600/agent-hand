@@ -48,8 +48,8 @@ export const VIEWPORT_MISMATCH_WARNING =
 /** CLI / MCP arguments → either clear overrides or a concrete device. */
 export function normalizeEmulate(input: Record<string, unknown>): Record<string, unknown> {
   const name = stringish(input.preset ?? input.device ?? input.size);
-  if (name === 'off' || name === 'clear' || input.off === true) return { preset: 'off' };
-  if (name && PRESETS[name]) return { preset: name };
+  if (name === 'off' || name === 'clear' || input.off === true) return withFit({ preset: 'off' }, input);
+  if (name && PRESETS[name]) return withFit({ preset: name }, input);
   const sized = name ? parseSizeToken(name) : null;
   if (name && !sized) {
     throw new Error('emulate preset must be iphone, pixel, or off, or a size like 390x844 or 390x844@3');
@@ -61,7 +61,7 @@ export function normalizeEmulate(input: Record<string, unknown>): Record<string,
   const scale = scaleSource == null || scaleSource === '' ? 2 : Number(scaleSource);
   if (!Number.isFinite(scale) || scale < 1 || scale > 4) throw new Error('deviceScaleFactor out of range');
   const mobile = input.mobile == null ? true : Boolean(input.mobile);
-  return { width, height, deviceScaleFactor: scale, mobile };
+  return withFit({ width, height, deviceScaleFactor: scale, mobile }, input);
 }
 
 export function resolveEmulation(params: Record<string, unknown>): EmulationSpec | { preset: 'off' } {
@@ -214,6 +214,165 @@ function stringish(value: unknown): string {
   return typeof value === 'string' ? value.trim().toLowerCase() : '';
 }
 
+/** Resize again when the content box is off by more than this many CSS pixels. */
+export const FIT_TOLERANCE_PX = 2;
+
+export type WindowState = 'normal' | 'minimized' | 'maximized' | 'fullscreen' | 'locked-fullscreen';
+
+export type WindowBox = {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  state: WindowState;
+};
+
+/**
+ * Page geometry measured before Emulation.setDeviceMetricsOverride.
+ * outer/inner are CSS pixels. windowWidth/windowHeight are whatever
+ * chrome.windows.get returns (DIPs, or physical pixels on some Windows builds).
+ * infobarHeight is extra CSS px of browser UI that is NOT already inside
+ * outerHeight-innerHeight, such as the debugger infobar measured separately.
+ */
+export type FitMeasure = {
+  outerWidth: number;
+  outerHeight: number;
+  innerWidth: number;
+  innerHeight: number;
+  devicePixelRatio: number;
+  windowWidth: number;
+  windowHeight: number;
+  infobarHeight?: number;
+};
+
+export type FitController = {
+  getWindow: () => Promise<WindowBox>;
+  setWindow: (update: Partial<WindowBox>) => Promise<void>;
+  measure: () => Promise<FitMeasure>;
+};
+
+/** Browser chrome around the page, in CSS pixels. */
+export function frameCss(measure: Pick<FitMeasure, 'outerWidth' | 'outerHeight' | 'innerWidth' | 'innerHeight' | 'infobarHeight'>): { width: number; height: number } {
+  return {
+    width: measure.outerWidth - measure.innerWidth,
+    height: measure.outerHeight - measure.innerHeight + (measure.infobarHeight ?? 0),
+  };
+}
+
+/**
+ * CSS pixels → chrome.windows.update pixels.
+ * At 125% Windows scaling, devicePixelRatio is 1.25 but chrome.windows width
+ * usually still equals window.outerWidth (one DIP is one CSS pixel). Scale stays 1.
+ * If the reported window width instead matches outerWidth * devicePixelRatio,
+ * the API is speaking physical pixels and the scale is the native devicePixelRatio.
+ */
+export function windowUnitScale(measure: Pick<FitMeasure, 'outerWidth' | 'windowWidth' | 'devicePixelRatio'>): number {
+  if (!(measure.outerWidth > 0) || !(measure.windowWidth > 0)) return 1;
+  const ratio = measure.windowWidth / measure.outerWidth;
+  if (Math.abs(ratio - 1) <= 0.02) return 1;
+  if (measure.devicePixelRatio > 0 && Math.abs(ratio - measure.devicePixelRatio) / measure.devicePixelRatio <= 0.05) {
+    return measure.devicePixelRatio;
+  }
+  return ratio;
+}
+
+export function fitWindowSize(
+  measure: FitMeasure,
+  target: { width: number; height: number },
+): { width: number; height: number; scale: number } {
+  const frame = frameCss(measure);
+  const scale = windowUnitScale(measure);
+  return {
+    width: Math.max(1, Math.round((target.width + frame.width) * scale)),
+    height: Math.max(1, Math.round((target.height + frame.height) * scale)),
+    scale,
+  };
+}
+
+/** Real content box implied by a window size and the pre-override frame. */
+export function contentFromWindow(box: { width: number; height: number }, measure: FitMeasure): { width: number; height: number } {
+  const frame = frameCss(measure);
+  const scale = windowUnitScale(measure);
+  return {
+    width: Math.round(box.width / scale - frame.width),
+    height: Math.round(box.height / scale - frame.height),
+  };
+}
+
+/** One correction, or null when the content box is already within FIT_TOLERANCE_PX. */
+export function planFitCorrection(
+  box: { width: number; height: number },
+  content: { width: number; height: number },
+  target: { width: number; height: number },
+  scale: number,
+): { width: number; height: number } | null {
+  const dw = target.width - content.width;
+  const dh = target.height - content.height;
+  if (Math.abs(dw) <= FIT_TOLERANCE_PX && Math.abs(dh) <= FIT_TOLERANCE_PX) return null;
+  return {
+    width: Math.round(box.width + dw * scale),
+    height: Math.round(box.height + dh * scale),
+  };
+}
+
+export function restoreWindowUpdate(saved: WindowBox): Partial<WindowBox> {
+  if (saved.state === 'maximized' || saved.state === 'fullscreen' || saved.state === 'locked-fullscreen') {
+    return { state: saved.state };
+  }
+  return {
+    state: 'normal',
+    left: saved.left,
+    top: saved.top,
+    width: saved.width,
+    height: saved.height,
+  };
+}
+
+export async function runFittedEmulation(
+  io: FitController,
+  saved: WindowBox | null,
+  target: { width: number; height: number },
+  apply: () => Promise<Record<string, unknown>>,
+): Promise<Record<string, unknown>> {
+  const initial = await io.getWindow();
+  const restoreWindow = saved ?? initial;
+  if (initial.state !== 'normal') await io.setWindow({ state: 'normal' });
+  const measurement = await io.measure();
+  const applied = await apply();
+  if (applied.applied === false) {
+    if (!saved && initial.state !== 'normal') await io.setWindow(restoreWindowUpdate(initial));
+    const warning = [applied.warning, 'Window was not resized because the emulated viewport did not apply.']
+      .filter((part) => typeof part === 'string' && part)
+      .join(' ');
+    return { ...applied, fitWindow: false, windowBefore: initial, warning };
+  }
+  const sized = fitWindowSize(measurement, target);
+  await io.setWindow({ state: 'normal', width: sized.width, height: sized.height });
+  let current = await io.getWindow();
+  let content = contentFromWindow(current, measurement);
+  const fix = planFitCorrection(current, content, target, sized.scale);
+  const corrected = fix != null;
+  if (fix) {
+    await io.setWindow({ width: fix.width, height: fix.height });
+    current = await io.getWindow();
+    content = contentFromWindow(current, measurement);
+  }
+  return {
+    ...applied,
+    fitWindow: true,
+    corrected,
+    infobarHeight: measurement.infobarHeight ?? 0,
+    windowBefore: initial,
+    windowAfter: current,
+    restoreWindow,
+    content,
+  };
+}
+
+export async function restoreFittedWindow(io: FitController, saved: WindowBox): Promise<void> {
+  await io.setWindow(restoreWindowUpdate(saved));
+}
+
 function asInt(value: unknown, name: string): number {
   if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) {
     const parsed = Number(value);
@@ -221,4 +380,14 @@ function asInt(value: unknown, name: string): number {
   }
   if (typeof value !== 'number' || !Number.isInteger(value)) throw new Error(`${name} must be an integer`);
   return value;
+}
+
+export function wantsFitWindow(input: Record<string, unknown> | undefined): boolean {
+  if (!input) return false;
+  return input.fitWindow === true || input.fitWindow === 'true';
+}
+
+function withFit(params: Record<string, unknown>, input: Record<string, unknown>): Record<string, unknown> {
+  if (wantsFitWindow(input)) params.fitWindow = true;
+  return params;
 }

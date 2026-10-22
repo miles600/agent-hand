@@ -14,6 +14,10 @@
     img.guest { cursor: pointer; margin-bottom: 8px; }
     .parent-card { cursor: pointer; }
     .pair { margin-top: 8px; }
+    .uni-tabbar, .flow-row, .pointer-row { display: flex; gap: 8px; margin: 8px 0; }
+    .tabs-item, .flow-row > div, .pointer-row > div, #vue-click { width: 72px; height: 36px; }
+    .pointer-row { cursor: pointer; }
+    .stack > div { display: block; width: 120px; height: 28px; margin-top: 4px; }
   </style>
 </head>
 <body>
@@ -41,6 +45,25 @@
   <div class="pair">
     <div class="parent-card"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"></div>
     <span>家长</span>
+  </div>
+  <div class="uni-tabbar">
+    <div class="tabs-item">当期</div>
+    <div class="tabs-item">往期</div>
+  </div>
+  <div class="flow-row">
+    <div>我的发起</div>
+    <div>我的待办</div>
+    <div>我的完成</div>
+  </div>
+  <div class="pointer-row">
+    <div>首页</div>
+    <div>进度</div>
+  </div>
+  <div id="vue-click">提交</div>
+  <p>这是一段说明文字，不应该变成可点击的引用。</p>
+  <div class="stack">
+    <div>单独一行</div>
+    <div>另一行</div>
   </div>
 </body>
 </html>

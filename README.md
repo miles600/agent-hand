@@ -114,7 +114,7 @@ node dist/bridge/index.js screenshot
 
 You should see one blue cursor travel to the button, a ripple, and the line “Trusted clicks: 1”. Chrome’s yellow bar appears the first time the debugger attaches. Leave it.
 
-`screenshot` writes a PNG under `~/.agent-hand/screenshots` (`%USERPROFILE%\.agent-hand\screenshots` on Windows) and prints the path. Boxes in the snapshot are CSS pixels. The image is CSS pixels times `devicePixelRatio`.
+`screenshot` writes a PNG under `~/.agent-hand/screenshots` (`%USERPROFILE%\.agent-hand\screenshots` on Windows) and prints the path. Boxes in the snapshot are CSS pixels. When the debugger is attached, the PNG is the emulated viewport: `cssWidth * devicePixelRatio` by `cssHeight * devicePixelRatio`, clipped with `Page.captureScreenshot` so the white margin and the browser chrome are not in the file. `captureVisibleTab` is only the fallback when the debugger is not attached, and `devicePixelRatio` is then the scale of that image.
 
 Scroll the buried button into view and click it:
 
@@ -143,7 +143,7 @@ agent-hand locate <text>
 agent-hand type <ref> <text> [--submit]
 agent-hand press <key>
 agent-hand scroll <up|down|left|right|ref> [amount]
-agent-hand emulate <iphone|pixel|off|390x844|390x844@3|width height [dpr]>
+agent-hand emulate <iphone|pixel|off|390x844|390x844@3|width height [dpr]> [--fit-window]
 agent-hand --require-trusted click <ref>
 agent-hand screenshot [--out <path>]
 agent-hand text [--max <n>]
@@ -165,7 +165,7 @@ While a direct DevTools session is attached, these commands drive that app. `det
 
 ## Mobile H5 (uni-app and Vue)
 
-Open the H5 build in Chrome like any other page (a dev server URL is fine). The snapshot lists normal controls and uni-app elements: `uni-button`, `uni-checkbox`, `uni-radio`, `uni-switch`, `uni-picker`, `uni-navigator`, `uni-label`, `.uni-select`, checklist rows, `[onclick]`, and the outermost element with `cursor: pointer`. Up to 300 controls are listed.
+Open the H5 build in Chrome like any other page (a dev server URL is fine). The snapshot lists normal controls and uni-app elements: `uni-button`, `uni-checkbox`, `uni-radio`, `uni-switch`, `uni-picker`, `uni-navigator`, `uni-label`, `.uni-select`, checklist rows, `[onclick]`, and the outermost element with `cursor: pointer`. A short label in a horizontal row (进度 tabs such as 当期/往期, or 流程中心 tabs such as 我的发起/我的待办/我的完成) gets a `tab` ref even when the node has no role and no `cursor: pointer`. The same goes for `.tab`, `.tabs-item`, `.uni-tab`, `.uni-tabbar__item`, and an element whose Vue vnode has `onClick`. A vertical stack of text is left out, so the list does not fill up with every label. Up to 300 controls are listed.
 
 A disabled or readonly picker field is not listed as a dead textbox. The ref is the clickable wrapper (`uni-picker`, a `uni-date` editor, or the small `uni-view` around it), named from the field value, and a click hits that wrapper. Checkboxes, radios, and switches include `checked` or `unchecked` (native `checked`, `aria-checked`, and uni-app's `uni-checkbox-input-checked` / `uni-radio-input-checked`). Image and card tiles get a ref named from alt text, `aria-label`, the text inside, or the label next to the tile.
 
@@ -177,7 +177,7 @@ node dist/bridge/index.js snapshot
 node dist/bridge/index.js click 1
 ```
 
-`emulate iphone` is 390×844 CSS pixels at device scale 3, with touch and a mobile user agent. `emulate pixel` is 412×915 at 2.625. `emulate 390x844` is that size at scale 2 (mobile and touch still on). `emulate 390x844@3` sets the scale to 3. `emulate 390 844` still works. `emulate off` clears it. The command reads `window.innerWidth`, `innerHeight`, and `devicePixelRatio` back and returns them as `cssWidth`, `cssHeight`, `devicePixelRatio`, plus `applied: true` when they match. `snapshot` starts with the same numbers (`viewport 390x844 dpr 3`). `status` repeats the last reading. Check those before trusting coordinates. The override stays while the extension debugger stays attached, including across a reload of the page. Opening DevTools, or `reload-extension`, drops it.
+`emulate iphone` is 390×844 CSS pixels at device scale 3, with touch and a mobile user agent. `emulate pixel` is 412×915 at 2.625. `emulate 390x844` is that size at scale 2 (mobile and touch still on). `emulate 390x844@3` sets the scale to 3. `emulate 390 844` still works. `emulate off` clears it. `emulate 390x844 --fit-window` (MCP `fitWindow: true`) then resizes the real Chrome window so the content area is that CSS size. The emulated page otherwise sits in the corner of the large window with a blank region beside and below it. The resize uses the pre-override gap between `outerWidth`/`outerHeight` and `innerWidth`/`innerHeight`, including the "<extension> started debugging this browser" infobar, and the native `devicePixelRatio` (1.25 at 125% Windows) when `chrome.windows` reports physical pixels. A maximized or fullscreen window is restored to normal first. One correction pass runs if the content box is still off by more than 2 CSS pixels. The result includes `windowBefore`, `windowAfter`, `content`, and `corrected`. `emulate off` puts the previous bounds and state back. This moves the window that holds your other tabs. Without `--fit-window` the window is never moved or resized. The command reads `window.innerWidth`, `innerHeight`, and `devicePixelRatio` back and returns them as `cssWidth`, `cssHeight`, `devicePixelRatio`, plus `applied: true` when they match. `snapshot` starts with the same numbers (`viewport 390x844 dpr 3`). `status` repeats the last reading. Check those before trusting coordinates. The override stays while the extension debugger stays attached, including across a reload of the page. Opening DevTools, or `reload-extension`, drops it.
 
 This extension cannot toggle DevTools' device toolbar. There is no API for that checkbox. Device mode and `Emulation.setDeviceMetricsOverride` write the same override and fight: toolbar on, DevTools wins; toolbar off but DevTools still open, DevTools often clears metrics and the page stays at the real window size. Recommended: close DevTools, run `emulate 390x844@3`, and confirm `applied` and the snapshot line. Use the device toolbar yourself only when you are watching and you do not need `isTrusted`. Undocking DevTools does not give you a trusted click.
 

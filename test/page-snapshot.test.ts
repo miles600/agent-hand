@@ -39,7 +39,13 @@ test('uni-app-like controls get actionable refs, names, and checked state', asyn
     await page.setContent(html);
     await page.addScriptTag({ content: source });
     const collected = await page.evaluate(() => {
-      const api = (globalThis as { __agentHand?: { collect: () => { elements: RawElement[] }; metrics: () => { cssWidth: number; cssHeight: number; devicePixelRatio: number } } }).__agentHand;
+      const g = globalThis as {
+        document?: { getElementById: (id: string) => { __vnode?: { props?: { onClick?: boolean } } } | null };
+        __agentHand?: { collect: () => { elements: RawElement[] }; metrics: () => { cssWidth: number; cssHeight: number; devicePixelRatio: number } };
+      };
+      const vue = g.document?.getElementById('vue-click');
+      if (vue) vue.__vnode = { props: { onClick: true } };
+      const api = g.__agentHand;
       if (!api) throw new Error('missing page api');
       return { elements: api.collect().elements, metrics: api.metrics() };
     });
@@ -63,6 +69,16 @@ test('uni-app-like controls get actionable refs, names, and checked state', asyn
     assert.ok(line('clickable', '教师'), built.text);
     assert.ok(line('clickable', '游客'), built.text);
     assert.ok(line('clickable', '家长'), built.text);
+    assert.ok(line('tab', '当期'), built.text);
+    assert.ok(line('tab', '往期'), built.text);
+    assert.ok(line('tab', '我的发起'), built.text);
+    assert.ok(line('tab', '我的待办'), built.text);
+    assert.ok(line('tab', '我的完成'), built.text);
+    assert.ok(line('tab', '首页'), built.text);
+    assert.ok(line('tab', '进度'), built.text);
+    assert.ok(line('clickable', '提交'), built.text);
+    assert.equal(built.items.some((item) => item.name === '单独一行' || item.name === '另一行'), false);
+    assert.equal(built.items.some((item) => item.name.includes('说明文字')), false);
     assert.match(built.text, /^viewport 390x844 dpr /);
 
     const clicked = await page.evaluate(() => {

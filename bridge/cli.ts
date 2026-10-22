@@ -12,7 +12,7 @@ export type CliAction =
   | { kind: 'call'; method: string; params: Record<string, unknown>; port?: number; cdp?: string; requireTrusted?: boolean };
 
 export function resolveCli(argv: string[]): CliAction {
-  const { port, cdp, requireTrusted, rest } = takeFlags(argv);
+  const { port, cdp, requireTrusted, fitWindow, rest } = takeFlags(argv);
   const trusted = requireTrusted ? { requireTrusted: true as const } : {};
   const [command, ...args] = rest;
   if (!command || command === 'help' || command === '--help' || command === '-h') {
@@ -26,6 +26,10 @@ export function resolveCli(argv: string[]): CliAction {
   const call = commandCall(command, args);
   if (call.method === 'attach_cdp' && !call.params.url && cdp) call.params.url = cdp;
   const normalized = normalizeCall(call.method, requireTrusted ? { ...call.params, requireTrusted: true } : call.params);
+  if (fitWindow) {
+    if (normalized.method !== 'emulate') throw new Error('--fit-window is only for emulate');
+    normalized.params.fitWindow = true;
+  }
   return { kind: 'call', method: normalized.method, params: normalized.params, port, cdp, ...trusted };
 }
 
@@ -261,11 +265,12 @@ function requiredArg(args: string[], index: number, name: string): string {
   return value;
 }
 
-function takeFlags(argv: string[]): { port?: number; cdp?: string; requireTrusted: boolean; rest: string[] } {
+function takeFlags(argv: string[]): { port?: number; cdp?: string; requireTrusted: boolean; fitWindow: boolean; rest: string[] } {
   const rest: string[] = [];
   let port: number | undefined;
   let cdp: string | undefined;
   let requireTrusted = false;
+  let fitWindow = false;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--port') {
@@ -294,12 +299,16 @@ function takeFlags(argv: string[]): { port?: number; cdp?: string; requireTruste
       requireTrusted = true;
       continue;
     }
+    if (arg === '--fit-window') {
+      fitWindow = true;
+      continue;
+    }
     rest.push(arg);
   }
   if (port != null && (!Number.isInteger(port) || port < 0 || port > 65535)) {
     throw new Error(`invalid port: ${port}`);
   }
-  return { port, cdp, requireTrusted, rest };
+  return { port, cdp, requireTrusted, fitWindow, rest };
 }
 
 function clientTimeout(method: string, params: Record<string, unknown>): number {
@@ -327,7 +336,7 @@ Usage:
   agent-hand type <ref> <text> [--submit]
   agent-hand press <key>
   agent-hand scroll <up|down|left|right|ref> [amount]
-  agent-hand emulate <iphone|pixel|off|390x844|390x844@3|width height [dpr]>
+  agent-hand emulate <iphone|pixel|off|390x844|390x844@3|width height [dpr]> [--fit-window]
   agent-hand screenshot [--out <path>]
   agent-hand text [--max <n>]
   agent-hand console [--clear] [--max <n>]
@@ -346,4 +355,8 @@ The bridge listens on 127.0.0.1 only. On first run it writes a token to
 It does not close that app and does not navigate unless you ask.
 emulate 390x844@3 sets a 390 by 844 CSS viewport at device pixel ratio 3,
 with mobile and touch, and keeps it while DevTools is closed.
+--fit-window resizes the real Chrome window so the page content matches
+that CSS size. The window holds your other tabs too. emulate off puts the
+previous size and maximized/fullscreen state back. Without the flag the
+window is never moved or resized.
 `;

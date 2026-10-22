@@ -57,6 +57,10 @@ function installListener(api: PageApi): void {
       sendResponse({ ok: true, result: api.metrics() });
       return undefined;
     }
+    if (msg.type === 'window-chrome') {
+      sendResponse({ ok: true, result: api.windowChrome() });
+      return undefined;
+    }
     if (msg.type === 'text') {
       sendResponse({ ok: true, result: api.text() });
       return undefined;

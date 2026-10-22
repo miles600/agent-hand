@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { CdpConnection, fetchCdpTargets, type CdpTarget } from './cdp.js';
 import { normalizeCdpUrl } from '../shared/cdp-url.js';
 import { matchFrameRect, type FrameRect } from '../shared/frames.js';
-import { applyEmulation, resolveEmulation, viewportMatches, type EmulationSpec } from '../shared/emulate.js';
+import { applyEmulation, resolveEmulation, viewportMatches, wantsFitWindow, type EmulationSpec } from '../shared/emulate.js';
 import {
   INPUT_TIMEOUT_MS,
   isInputFallbackError,
@@ -21,6 +21,12 @@ import {
   type NetworkError,
 } from '../shared/monitor.js';
 import { DEFAULT_CURSOR_MS } from '../shared/protocol.js';
+import {
+  nextScreenshotScale,
+  pngDimensionsFromBase64,
+  screenshotScaleReport,
+  viewportScreenshotParams,
+} from '../shared/screenshot.js';
 import { sleep } from '../shared/sleep.js';
 import { buildSnapshot, type RawElement } from '../shared/snapshot.js';
 
@@ -443,18 +449,41 @@ export class DirectSession {
     const page = await this.requirePage();
     await page.send('Page.bringToFront').catch(() => undefined);
     await sleep(80);
-    const shot = await page.send<{ data?: string }>('Page.captureScreenshot', { format: 'png' });
     const main = this.mainContext();
     const metrics = main
       ? await this.callApi<Metrics>(main.id, 'metrics', [])
       : { cssWidth: 0, cssHeight: 0, devicePixelRatio: 1 };
-    if (!shot.data) throw new Error('screenshot payload was empty');
+    const captured = await this.captureViewport(page, metrics);
     return {
-      base64: shot.data,
-      devicePixelRatio: metrics.devicePixelRatio,
+      ...captured,
       cssWidth: metrics.cssWidth,
       cssHeight: metrics.cssHeight,
+      via: 'cdp',
+      mode: 'cdp',
     };
+  }
+
+  private async captureViewport(
+    page: { send: (method: string, params?: Record<string, unknown>) => Promise<unknown> },
+    metrics: Metrics,
+  ): Promise<{ base64: string; devicePixelRatio: number; warning?: string }> {
+    const first = await this.takeShot(page, metrics, 1);
+    const size = pngDimensionsFromBase64(first);
+    if (!size) return { base64: first, devicePixelRatio: metrics.devicePixelRatio };
+    const retry = nextScreenshotScale(size, metrics.cssWidth, metrics.cssHeight, metrics.devicePixelRatio);
+    const base64 = retry.retry ? await this.takeShot(page, metrics, retry.scale) : first;
+    const finalSize = pngDimensionsFromBase64(base64) ?? size;
+    return { base64, ...screenshotScaleReport(finalSize, metrics.cssWidth, metrics.cssHeight, metrics.devicePixelRatio) };
+  }
+
+  private async takeShot(
+    page: { send: (method: string, params?: Record<string, unknown>) => Promise<unknown> },
+    metrics: Metrics,
+    scale: number,
+  ): Promise<string> {
+    const shot = await page.send('Page.captureScreenshot', viewportScreenshotParams(metrics, scale)) as { data?: string };
+    if (!shot?.data) throw new Error('screenshot payload was empty');
+    return shot.data;
   }
 
   private async getText(max: number): Promise<unknown> {
@@ -502,13 +531,17 @@ export class DirectSession {
       send: (method, commandParams) => page.send(method, commandParams ?? {}),
       readViewport: () => this.readViewport(),
     });
+    const fitNote = wantsFitWindow(params)
+      ? 'fitWindow resizes the real Chrome window through the extension. This direct session left the window alone.'
+      : '';
+    const warning = [result.warning, fitNote].filter((part) => typeof part === 'string' && part).join(' ');
     if (spec.preset === 'off') {
       this.touch = false;
-      return { ...result, mode: 'cdp' };
+      return { ...result, ...(warning ? { warning } : {}), mode: 'cdp' };
     }
     this.emulation = spec;
     this.touch = spec.mobile && result.applied !== false;
-    return { ...result, mode: 'cdp' };
+    return { ...result, ...(warning ? { warning } : {}), mode: 'cdp' };
   }
 
   private async readViewport(): Promise<Metrics | undefined> {

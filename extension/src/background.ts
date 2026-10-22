@@ -3,8 +3,13 @@ import {
   applyEmulation,
   deviceMetricsOverride,
   resolveEmulation,
+  restoreFittedWindow,
+  runFittedEmulation,
   viewportMatches,
+  wantsFitWindow,
   type EmulationSpec,
+  type WindowBox,
+  type WindowState,
 } from '../../shared/emulate.js';
 import { matchFrameRect, type FrameRect } from '../../shared/frames.js';
 import {
@@ -26,6 +31,12 @@ import {
 import { DEFAULT_CURSOR_MS, DEFAULT_PORT } from '../../shared/protocol.js';
 import { sleep } from '../../shared/sleep.js';
 import { buildSnapshot, type RawElement, type SnapshotItem } from '../../shared/snapshot.js';
+import {
+  nextScreenshotScale,
+  pngDimensionsFromBase64,
+  screenshotScaleReport,
+  viewportScreenshotParams,
+} from '../../shared/screenshot.js';
 
 type RefRecord = { ref: number; ahId: string; frameId: number };
 type PageElement = Omit<RawElement, 'frameId'>;
@@ -43,6 +54,8 @@ let selectedTabId: number | null = null;
 let refMap = new Map<number, RefRecord>();
 let touchEmulated = false;
 let activeEmulation: EmulationSpec | null = null;
+/** Original window, kept when --fit-window resized it, so emulate off can put it back. */
+let savedFit: (WindowBox & { windowId: number }) | null = null;
 /** Set when attach is refused because DevTools already holds the debugger. */
 let lastAttachProblem = '';
 const attached = new Set<number>();
@@ -529,14 +542,47 @@ async function screenshot(): Promise<unknown> {
   await ensureReady(tabId);
   await sleep(80);
   if (tab.windowId == null) throw new Error('tab has no window');
+  const metrics = await ask<Metrics>(tabId, 0, 'metrics').catch(() => ({ cssWidth: 0, cssHeight: 0, devicePixelRatio: 1 }));
+  if (attached.has(tabId)) {
+    try {
+      const captured = await captureViewportPng(tabId, metrics);
+      return { ...captured, cssWidth: metrics.cssWidth, cssHeight: metrics.cssHeight, via: 'cdp' };
+    } catch {
+      // DevTools or a dropped debugger: the visible-tab image is the fallback.
+    }
+  }
   const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
-  const metrics = await ask<Metrics>(tabId, 0, 'metrics');
+  const base64 = dataUrl.replace(/^data:image\/png;base64,/, '');
+  const size = pngDimensionsFromBase64(base64);
+  const report = size
+    ? screenshotScaleReport(size, metrics.cssWidth, metrics.cssHeight, metrics.devicePixelRatio)
+    : { devicePixelRatio: metrics.devicePixelRatio };
   return {
-    base64: dataUrl.replace(/^data:image\/png;base64,/, ''),
-    devicePixelRatio: metrics.devicePixelRatio,
+    base64,
     cssWidth: metrics.cssWidth,
     cssHeight: metrics.cssHeight,
+    via: 'visible-tab',
+    ...report,
   };
+}
+
+async function captureViewportPng(
+  tabId: number,
+  metrics: Metrics,
+): Promise<{ base64: string; devicePixelRatio: number; warning?: string }> {
+  const first = await shootViewport(tabId, metrics, 1);
+  const size = pngDimensionsFromBase64(first);
+  if (!size) return { base64: first, devicePixelRatio: metrics.devicePixelRatio };
+  const again = nextScreenshotScale(size, metrics.cssWidth, metrics.cssHeight, metrics.devicePixelRatio);
+  const base64 = again.retry ? await shootViewport(tabId, metrics, again.scale) : first;
+  const finalSize = pngDimensionsFromBase64(base64) ?? size;
+  return { base64, ...screenshotScaleReport(finalSize, metrics.cssWidth, metrics.cssHeight, metrics.devicePixelRatio) };
+}
+
+async function shootViewport(tabId: number, metrics: Metrics, scale: number): Promise<string> {
+  const shot = await sendCommand(tabId, 'Page.captureScreenshot', viewportScreenshotParams(metrics, scale), 15000) as { data?: string };
+  if (!shot?.data) throw new Error('screenshot payload was empty');
+  return shot.data;
 }
 
 async function getText(max: number): Promise<unknown> {
@@ -978,21 +1024,157 @@ async function emulate(params: Record<string, unknown>): Promise<unknown> {
   await focusTab(tab);
   await ensureReady(tabId);
   const spec = resolveEmulation(params);
+  const fit = wantsFitWindow(params);
   if (spec.preset === 'off') {
     activeEmulation = null;
     touchEmulated = false;
     await persistEmulation(null);
+    await attachSettled(tabId);
+    const result = await applyEmulation(spec, {
+      send: (method, commandParams) => sendCommand(tabId, method, commandParams, 5000),
+      readViewport: () => ask<Metrics>(tabId, 0, 'metrics'),
+    });
+    const restored = await restoreFitIfSaved();
+    return { ...result, ...restored };
   }
-  await attachSettled(tabId);
-  const result = await applyEmulation(spec, {
-    send: (method, commandParams) => sendCommand(tabId, method, commandParams, 5000),
-    readViewport: () => ask<Metrics>(tabId, 0, 'metrics'),
-  });
-  if (spec.preset === 'off') return result;
-  activeEmulation = spec;
-  touchEmulated = spec.mobile && result.applied !== false;
-  await persistEmulation(spec);
-  return result;
+  const apply = async () => {
+    await attachSettled(tabId);
+    const result = await applyEmulation(spec, {
+      send: (method, commandParams) => sendCommand(tabId, method, commandParams, 5000),
+      readViewport: () => ask<Metrics>(tabId, 0, 'metrics'),
+    });
+    activeEmulation = spec;
+    touchEmulated = spec.mobile && result.applied !== false;
+    await persistEmulation(spec);
+    return result;
+  };
+  if (!fit || tab.windowId == null) return apply();
+  const windowId = tab.windowId;
+  const existing = await loadSavedFit();
+  if (existing && existing.windowId !== windowId) await restoreFitIfSaved();
+  const kept = existing && existing.windowId === windowId ? stripWindowId(existing) : null;
+  if (attached.has(tabId)) {
+    try {
+      await sendCommand(tabId, 'Emulation.clearDeviceMetricsOverride', {}, 5000);
+      await sendCommand(tabId, 'Emulation.setTouchEmulationEnabled', { enabled: false }, 5000);
+    } catch {
+      // The next read still reports whatever viewport the page actually has.
+    }
+  }
+  await persistEmulation(null);
+  const note = { infobar: 0 };
+  const fitted = await runFittedEmulation(fitController(windowId, tabId, note), kept, spec, apply);
+  if (note.infobar > 0) fitted.infobarHeight = note.infobar;
+  if (fitted.fitWindow === true && !kept && isWindowBox(fitted.restoreWindow)) {
+    await storeFit(windowId, fitted.restoreWindow);
+  }
+  return fitted;
+}
+
+type PageChrome = {
+  outerWidth: number;
+  outerHeight: number;
+  innerWidth: number;
+  innerHeight: number;
+  devicePixelRatio: number;
+};
+
+function fitController(windowId: number, tabId: number, note: { infobar: number }) {
+  return {
+    getWindow: async () => boxFromChrome(await chrome.windows.get(windowId)),
+    setWindow: async (update: Partial<WindowBox>) => {
+      await chrome.windows.update(windowId, {
+        ...(update.state ? { state: update.state } : {}),
+        ...(update.left != null ? { left: Math.round(update.left) } : {}),
+        ...(update.top != null ? { top: Math.round(update.top) } : {}),
+        ...(update.width != null ? { width: Math.round(update.width) } : {}),
+        ...(update.height != null ? { height: Math.round(update.height) } : {}),
+      });
+    },
+    measure: async () => {
+      const wasAttached = attached.has(tabId);
+      const before = wasAttached ? null : await ask<PageChrome>(tabId, 0, 'window-chrome');
+      await attachSettled(tabId);
+      const after = await ask<PageChrome>(tabId, 0, 'window-chrome');
+      if (before) note.infobar = Math.max(0, Math.round(before.innerHeight - after.innerHeight));
+      const win = await chrome.windows.get(windowId);
+      // innerHeight here is after the infobar, so outer-inner already includes that bar.
+      return {
+        outerWidth: after.outerWidth,
+        outerHeight: after.outerHeight,
+        innerWidth: after.innerWidth,
+        innerHeight: after.innerHeight,
+        devicePixelRatio: after.devicePixelRatio || 1,
+        windowWidth: win.width ?? after.outerWidth,
+        windowHeight: win.height ?? after.outerHeight,
+      };
+    },
+  };
+}
+
+function boxFromChrome(win: chrome.windows.Window): WindowBox {
+  return {
+    left: win.left ?? 0,
+    top: win.top ?? 0,
+    width: win.width ?? 0,
+    height: win.height ?? 0,
+    state: asWindowState(win.state),
+  };
+}
+
+function asWindowState(state: string | undefined): WindowState {
+  if (state === 'minimized' || state === 'maximized' || state === 'fullscreen' || state === 'locked-fullscreen') return state;
+  return 'normal';
+}
+
+function isWindowBox(value: unknown): value is WindowBox {
+  if (!value || typeof value !== 'object') return false;
+  const box = value as WindowBox;
+  return typeof box.width === 'number' && typeof box.height === 'number' && typeof box.state === 'string';
+}
+
+function stripWindowId(saved: WindowBox & { windowId: number }): WindowBox {
+  return { left: saved.left, top: saved.top, width: saved.width, height: saved.height, state: saved.state };
+}
+
+async function loadSavedFit(): Promise<(WindowBox & { windowId: number }) | null> {
+  if (savedFit) return savedFit;
+  try {
+    const stored = await chrome.storage.session.get('fitWindow');
+    const value = stored.fitWindow;
+    if (!isWindowBox(value) || typeof (value as { windowId?: unknown }).windowId !== 'number') return null;
+    savedFit = value as WindowBox & { windowId: number };
+    return savedFit;
+  } catch {
+    return null;
+  }
+}
+
+async function storeFit(windowId: number, box: WindowBox): Promise<void> {
+  savedFit = { ...box, windowId };
+  try {
+    await chrome.storage.session.set({ fitWindow: savedFit });
+  } catch {
+    // session storage can be unavailable; the in-memory copy still restores
+  }
+}
+
+async function restoreFitIfSaved(): Promise<Record<string, unknown>> {
+  const saved = await loadSavedFit();
+  if (!saved) return {};
+  try {
+    await restoreFittedWindow(fitController(saved.windowId, 0, { infobar: 0 }), stripWindowId(saved));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { warning: `Could not restore the Chrome window (${message}).` };
+  }
+  savedFit = null;
+  try {
+    await chrome.storage.session.remove('fitWindow');
+  } catch {
+    // the in-memory copy is already cleared
+  }
+  return { restoredWindow: stripWindowId(saved) };
 }
 
 async function readConsole(params: Record<string, unknown>): Promise<unknown> {
