@@ -72,6 +72,11 @@ function installListener(api: PageApi): void {
       });
       return undefined;
     }
+    if (msg.type === 'arm-click') {
+      api.armClick(Number(msg.x), Number(msg.y));
+      sendResponse({ ok: true });
+      return undefined;
+    }
     if (msg.type === 'locate') {
       sendResponse({ ok: true, result: api.locate(String(msg.text ?? '')) });
       return undefined;

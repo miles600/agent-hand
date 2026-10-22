@@ -1,5 +1,6 @@
 import { normalizeCdpUrl } from './cdp-url.js';
 import { normalizeEmulate } from './emulate.js';
+import { requiresTrustedInput } from './input.js';
 import { parseKeyCombo } from './keys.js';
 
 const DIRECTIONS = new Set(['up', 'down', 'left', 'right']);
@@ -18,20 +19,20 @@ export function normalizeCall(
     case 'navigate':
       return { method, params: { url: asHttpUrl(input.url) } };
     case 'click':
-      return { method, params: withMotion({ ref: asRef(input.ref) }, input) };
+      return { method, params: withTrusted(withMotion({ ref: asRef(input.ref) }, input), input) };
     case 'type': {
       const text = asString(input.text, 'text');
       if (text.length === 0) throw new Error('text is required');
       if (text.length > 20000) throw new Error('text is too long');
       return {
         method,
-        params: withMotion({ ref: asRef(input.ref), text, submit: Boolean(input.submit) }, input),
+        params: withTrusted(withMotion({ ref: asRef(input.ref), text, submit: Boolean(input.submit) }, input), input),
       };
     }
     case 'press': {
       const key = asString(input.key, 'key');
       parseKeyCombo(key);
-      return { method, params: { key } };
+      return { method, params: withTrusted({ key }, input) };
     }
     case 'scroll': {
       const params: Record<string, unknown> = {};
@@ -53,7 +54,7 @@ export function normalizeCall(
         const duration = asDuration(input.duration);
         if (duration != null) params.duration = duration;
       }
-      return { method, params };
+      return { method, params: withTrusted(params, input) };
     }
     case 'screenshot': {
       const params: Record<string, unknown> = {};
@@ -64,7 +65,7 @@ export function normalizeCall(
       const x = asFinite(input.x, 'x');
       const y = asFinite(input.y, 'y');
       if (x < 0 || y < 0 || x > 100000 || y > 100000) throw new Error('click_xy needs viewport CSS pixels');
-      return { method, params: withMotion({ x, y }, input) };
+      return { method, params: withTrusted(withMotion({ x, y }, input), input) };
     }
     case 'locate': {
       const text = asString(input.text, 'text');
@@ -95,6 +96,11 @@ export function normalizeCall(
     default:
       throw new Error(`unknown method: ${method}`);
   }
+}
+
+function withTrusted(params: Record<string, unknown>, input: Record<string, unknown>): Record<string, unknown> {
+  if (requiresTrustedInput(input)) params.requireTrusted = true;
+  return params;
 }
 
 function withMotion(

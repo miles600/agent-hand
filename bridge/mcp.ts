@@ -1,3 +1,4 @@
+import { TRUSTED_INPUT_METHODS } from '../shared/input.js';
 import { TOOLS } from '../shared/tools.js';
 import { VERSION } from '../shared/protocol.js';
 import type { Hand } from './client.js';
@@ -11,7 +12,7 @@ type Rpc = {
   params?: Record<string, unknown>;
 };
 
-export function serveMcp(hand: Hand): Promise<void> {
+export function serveMcp(hand: Hand, options?: { requireTrusted?: boolean }): Promise<void> {
   const stdin = process.stdin;
   stdin.resume();
   let buffer = Buffer.alloc(0);
@@ -40,7 +41,7 @@ export function serveMcp(hand: Hand): Promise<void> {
           send({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'parse error' } });
           continue;
         }
-        void handle(hand, message);
+        void handle(hand, message, options?.requireTrusted === true);
       }
     };
     stdin.on('data', onData);
@@ -51,7 +52,7 @@ export function serveMcp(hand: Hand): Promise<void> {
   });
 }
 
-async function handle(hand: Hand, message: Rpc): Promise<void> {
+async function handle(hand: Hand, message: Rpc, requireTrusted: boolean): Promise<void> {
   const id = message.id;
   const method = message.method ?? '';
   const params = message.params ?? {};
@@ -86,7 +87,8 @@ async function handle(hand: Hand, message: Rpc): Promise<void> {
     }
     if (method === 'tools/call') {
       const name = typeof params.name === 'string' ? params.name : '';
-      const args = (params.arguments ?? {}) as Record<string, unknown>;
+      const args = { ...((params.arguments ?? {}) as Record<string, unknown>) };
+      if (requireTrusted && TRUSTED_INPUT_METHODS.has(name)) args.requireTrusted = true;
       try {
         const data = await hand.call(name, args);
         const text = typeof data === 'string' ? data : JSON.stringify(data, null, 2);

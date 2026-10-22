@@ -28,16 +28,18 @@ test('direct CDP session falls back without closing the app', async () => {
       const snap = await session.call('snapshot', {}) as { text: string; items: { ref: number; name: string }[] };
       assert.match(snap.text, /Save/);
       assert.match(snap.text, /Name/);
-      const clicked = await session.call('click_xy', { x: 12, y: 20, duration: 0 }) as { via: string };
+      const clicked = await session.call('click_xy', { x: 12, y: 20, duration: 0 }) as { via: string; warning?: string };
       assert.equal(clicked.via, 'synthetic');
+      assert.match(clicked.warning ?? '', /DevTools/);
       assert.equal(mock.openSockets(), 1);
       const typed = await session.call('type', { ref: snap.items.find((item) => item.name === 'Name')?.ref, text: 'Ada' }) as { via: string; clickVia: string };
       assert.equal(typed.clickVia, 'synthetic');
       assert.equal(typed.via, 'synthetic');
       assert.equal(mock.seen.includes('Input.insertText'), false);
       assert.ok(mock.expressions.some((expression) => expression.includes('api["setValue"]')));
-      const pressed = await session.call('press', { key: 'Enter' }) as { via: string };
+      const pressed = await session.call('press', { key: 'Enter' }) as { via: string; warning?: string };
       assert.equal(pressed.via, 'synthetic');
+      assert.match(pressed.warning ?? '', /DevTools/);
       assert.ok(mock.expressions.some((expression) => expression.includes('api["syntheticKey"]')));
       const scrolled = await session.call('scroll', { direction: 'down', amount: 100 }) as { via: string };
       assert.equal(scrolled.via, 'synthetic');
@@ -47,9 +49,34 @@ test('direct CDP session falls back without closing the app', async () => {
       assert.ok(network.errors.some((error) => error.status === 404));
       assert.ok(network.errors.some((error) => error.status === 0 && error.url.includes('/api')));
       assert.equal(network.errors.some((error) => error.url.includes('/ok')), false);
-      const emulated = await session.call('emulate', { preset: 'iphone' }) as { width: number; touch: boolean };
+      const nameRef = snap.items.find((item) => item.name === 'Name')?.ref;
+      const syntheticClicks = () => mock.expressions.filter((expression) => expression.includes('syntheticClick')).length;
+      const beforeTrusted = syntheticClicks();
+      await assert.rejects(
+        () => session.call('click_xy', { x: 12, y: 20, duration: 0, requireTrusted: true }),
+        /Trusted input required[\s\S]*DevTools[\s\S]*Synthetic input was not sent/,
+      );
+      await assert.rejects(
+        () => session.call('type', { ref: nameRef, text: 'nope', requireTrusted: true }),
+        /Trusted input required[\s\S]*DevTools/,
+      );
+      await assert.rejects(
+        () => session.call('press', { key: 'Enter', requireTrusted: true }),
+        /Trusted input required[\s\S]*DevTools/,
+      );
+      assert.equal(syntheticClicks(), beforeTrusted);
+      const emulated = await session.call('emulate', { preset: 'iphone' }) as {
+        width: number;
+        touch: boolean;
+        applied: boolean;
+        cssWidth: number;
+        cssHeight: number;
+      };
       assert.equal(emulated.width, 390);
       assert.equal(emulated.touch, true);
+      assert.equal(emulated.applied, true);
+      assert.equal(emulated.cssWidth, 390);
+      assert.equal(emulated.cssHeight, 844);
       assert.ok(mock.seen.includes('Emulation.setDeviceMetricsOverride'));
       assert.equal(mock.seen.includes('Page.navigate'), false);
       const shot = await session.call('screenshot', {}) as { base64: string };

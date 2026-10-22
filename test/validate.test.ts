@@ -24,6 +24,18 @@ test('normalizes the commands an agent sends', () => {
     method: 'emulate',
     params: { preset: 'iphone' },
   });
+  assert.deepEqual(normalizeCall('emulate', { size: '390x844' }), {
+    method: 'emulate',
+    params: { width: 390, height: 844, deviceScaleFactor: 2, mobile: true },
+  });
+  assert.deepEqual(normalizeCall('click', { ref: 4, requireTrusted: true }), {
+    method: 'click',
+    params: { ref: 4, requireTrusted: true },
+  });
+  assert.deepEqual(normalizeCall('press', { key: 'Enter', requireTrusted: 'true' }), {
+    method: 'press',
+    params: { key: 'Enter', requireTrusted: true },
+  });
   assert.equal(normalizeCall('attach_cdp', { url: 'http://127.0.0.1:9222/json' }).params.url, 'http://127.0.0.1:9222');
   assert.deepEqual(normalizeCall('select_tab', { tabId: 'TARGET-1' }).params, { tabId: 'TARGET-1' });
   assert.throws(() => normalizeCall('attach_cdp', { url: 'http://example.com:9222' }), /loopback/);

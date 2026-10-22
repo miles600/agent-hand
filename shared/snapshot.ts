@@ -11,6 +11,8 @@ export type RawElement = {
   width: number;
   height: number;
   disabled: boolean;
+  /** Set for checkbox, radio, and switch. "mixed" is aria-checked="mixed". */
+  checked?: boolean | 'mixed';
 };
 
 export type SnapshotItem = RawElement & { ref: number };
@@ -37,6 +39,7 @@ export function buildSnapshot(
     width: Math.round(element.width),
     height: Math.round(element.height),
     disabled: element.disabled,
+    ...(element.checked == null ? {} : { checked: element.checked }),
   }));
   const dpr = Number.isFinite(meta.devicePixelRatio) ? meta.devicePixelRatio : 1;
   const lines = [
@@ -51,7 +54,15 @@ export function buildSnapshot(
 
 function formatItem(item: SnapshotItem): string {
   const box = `${item.x},${item.y} ${item.width}x${item.height}`;
+  const toggle = item.checked === true
+    ? 'checked'
+    : item.checked === false
+      ? 'unchecked'
+      : item.checked === 'mixed'
+        ? 'mixed'
+        : '';
   const flags = [
+    toggle,
     item.disabled ? 'disabled' : '',
     item.frameId !== 0 ? 'frame' : '',
   ].filter(Boolean);

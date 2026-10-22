@@ -3,8 +3,14 @@ import { fileURLToPath } from 'node:url';
 import { CdpConnection, fetchCdpTargets, type CdpTarget } from './cdp.js';
 import { normalizeCdpUrl } from '../shared/cdp-url.js';
 import { matchFrameRect, type FrameRect } from '../shared/frames.js';
-import { resolveEmulation } from '../shared/emulate.js';
-import { INPUT_TIMEOUT_MS, isInputFallbackError } from '../shared/input.js';
+import { applyEmulation, resolveEmulation, viewportMatches, type EmulationSpec } from '../shared/emulate.js';
+import {
+  INPUT_TIMEOUT_MS,
+  isInputFallbackError,
+  requiresTrustedInput,
+  syntheticInputWarning,
+  trustedInputRequiredError,
+} from '../shared/input.js';
 import { parseKeyCombo, type KeyDispatch } from '../shared/keys.js';
 import {
   consoleFromCdp,
@@ -52,6 +58,7 @@ export class DirectSession {
   private networkLog: NetworkError[] = [];
   private requestUrls = new Map<string, string>();
   private touch = false;
+  private emulation: EmulationSpec | null = null;
   private scriptArmed = false;
 
   private constructor(
@@ -113,7 +120,7 @@ export class DirectSession {
       case 'type':
         return this.typeText(params);
       case 'press':
-        return this.press(String(params.key ?? ''));
+        return this.press(String(params.key ?? ''), requiresTrustedInput(params));
       case 'scroll':
         return this.scroll(params);
       case 'screenshot':
@@ -229,6 +236,7 @@ export class DirectSession {
     await page.send('Page.navigate', { url });
     await loaded;
     this.installed.clear();
+    await this.holdEmulation();
     const info = await this.pageInfo();
     return { url: info.href || url, title: info.title, mode: 'cdp' };
   }
@@ -237,6 +245,7 @@ export class DirectSession {
     const page = await this.requirePage();
     await page.send('Page.bringToFront').catch(() => undefined);
     await this.waitForMain(1500);
+    await this.holdEmulation();
     const contexts = this.defaultContexts();
     if (!contexts.length) throw new Error('page script is not available on this target');
     const collected: { ctx: Ctx; elements: PageElement[] }[] = [];
@@ -297,8 +306,16 @@ export class DirectSession {
     const duration = durationOf(params);
     await this.cursor(at.x, at.y, 'Click', duration);
     await this.ripple();
-    const via = await this.clickAt(at.x, at.y, entry.contextId, at.localX, at.localY);
-    return { ref, via, x: at.x, y: at.y, devicePixelRatio: at.devicePixelRatio, mode: 'cdp' };
+    const delivered = await this.clickAt(at.x, at.y, entry.contextId, at.localX, at.localY, requiresTrustedInput(params));
+    return {
+      ...(delivered.warning ? { warning: delivered.warning } : {}),
+      ref,
+      via: delivered.via,
+      x: at.x,
+      y: at.y,
+      devicePixelRatio: at.devicePixelRatio,
+      mode: 'cdp',
+    };
   }
 
   private async typeText(params: Record<string, unknown>): Promise<unknown> {
@@ -308,11 +325,13 @@ export class DirectSession {
     const at = await this.reveal(entry);
     await this.cursor(at.x, at.y, 'Type', durationOf(params));
     await this.ripple();
-    const clickVia = await this.clickAt(at.x, at.y, entry.contextId, at.localX, at.localY);
+    const requireTrusted = requiresTrustedInput(params);
+    const clicked = await this.clickAt(at.x, at.y, entry.contextId, at.localX, at.localY, requireTrusted);
     await this.callApi(entry.contextId, 'focus', [entry.ahId]);
     await sleep(40);
     let via: Via = 'trusted';
-    if (clickVia !== 'trusted') {
+    let warning = clicked.warning;
+    if (clicked.via !== 'trusted') {
       via = 'synthetic';
       await this.setFieldValue(entry, text);
     } else {
@@ -320,7 +339,10 @@ export class DirectSession {
         await this.input('Input.insertText', { text });
       } catch (error) {
         if (!isInputFallbackError(error)) throw error;
+        const reason = error instanceof Error ? error.message : String(error);
+        if (requireTrusted) throw trustedInputRequiredError(reason);
         via = 'synthetic';
+        warning = syntheticInputWarning(reason);
         await this.setFieldValue(entry, text);
       }
     }
@@ -332,16 +354,29 @@ export class DirectSession {
           await this.keyDownUp(enter);
         } catch (error) {
           if (!isInputFallbackError(error)) throw error;
+          const reason = error instanceof Error ? error.message : String(error);
+          if (requireTrusted) throw trustedInputRequiredError(reason);
+          warning = syntheticInputWarning(reason);
           await this.syntheticKey(enter);
         }
-      } else {
+      } else if (!requireTrusted) {
         await this.syntheticKey(enter);
+      } else {
+        throw trustedInputRequiredError(warning || 'click was not trusted');
       }
     }
-    return { ref, length: text.length, submitted: params.submit === true, via, clickVia, mode: 'cdp' };
+    return {
+      ...(warning ? { warning } : {}),
+      ref,
+      length: text.length,
+      submitted: params.submit === true,
+      via,
+      clickVia: clicked.via,
+      mode: 'cdp',
+    };
   }
 
-  private async press(key: string): Promise<unknown> {
+  private async press(key: string, requireTrusted = false): Promise<unknown> {
     const page = await this.requirePage();
     await page.send('Page.bringToFront').catch(() => undefined);
     const parsed = parseKeyCombo(key);
@@ -351,8 +386,10 @@ export class DirectSession {
       return { key: parsed.key, via: 'trusted', mode: 'cdp' };
     } catch (error) {
       if (!isInputFallbackError(error)) throw error;
+      const reason = error instanceof Error ? error.message : String(error);
+      if (requireTrusted) throw trustedInputRequiredError(reason);
       await this.syntheticKey(parsed);
-      return { key: parsed.key, via: 'synthetic', mode: 'cdp' };
+      return { warning: syntheticInputWarning(reason), key: parsed.key, via: 'synthetic', mode: 'cdp' };
     }
   }
 
@@ -386,8 +423,19 @@ export class DirectSession {
       return { direction, amount, x, y, devicePixelRatio: metrics.devicePixelRatio, via: 'trusted', mode: 'cdp' };
     } catch (error) {
       if (!isInputFallbackError(error)) throw error;
+      const reason = error instanceof Error ? error.message : String(error);
+      if (requiresTrustedInput(params)) throw trustedInputRequiredError(reason);
       await this.callApi(main.id, 'syntheticScroll', [x, y, delta.x, delta.y]);
-      return { direction, amount, x, y, devicePixelRatio: metrics.devicePixelRatio, via: 'synthetic', mode: 'cdp' };
+      return {
+        warning: syntheticInputWarning(reason),
+        direction,
+        amount,
+        x,
+        y,
+        devicePixelRatio: metrics.devicePixelRatio,
+        via: 'synthetic',
+        mode: 'cdp',
+      };
     }
   }
 
@@ -434,8 +482,8 @@ export class DirectSession {
     if (!main) throw new Error('page script is not available on this target');
     await this.cursor(x, y, 'Click', durationOf(params));
     await this.ripple();
-    const via = await this.clickAt(x, y, main.id, x, y);
-    return { x, y, via, mode: 'cdp' };
+    const delivered = await this.clickAt(x, y, main.id, x, y, requiresTrustedInput(params));
+    return { ...(delivered.warning ? { warning: delivered.warning } : {}), x, y, via: delivered.via, mode: 'cdp' };
   }
 
   private async locate(text: string): Promise<unknown> {
@@ -449,34 +497,35 @@ export class DirectSession {
   private async emulate(params: Record<string, unknown>): Promise<unknown> {
     const page = await this.requirePage();
     const spec = resolveEmulation(params);
+    if (spec.preset === 'off') this.emulation = null;
+    const result = await applyEmulation(spec, {
+      send: (method, commandParams) => page.send(method, commandParams ?? {}),
+      readViewport: () => this.readViewport(),
+    });
     if (spec.preset === 'off') {
       this.touch = false;
-      await page.send('Emulation.clearDeviceMetricsOverride');
-      await page.send('Emulation.setTouchEmulationEnabled', { enabled: false });
-      await page.send('Emulation.setUserAgentOverride', { userAgent: '' }).catch(() => undefined);
-      return { preset: 'off', touch: false, mode: 'cdp' };
+      return { ...result, mode: 'cdp' };
     }
-    await page.send('Emulation.setDeviceMetricsOverride', {
-      width: spec.width,
-      height: spec.height,
-      deviceScaleFactor: spec.deviceScaleFactor,
-      mobile: spec.mobile,
+    this.emulation = spec;
+    this.touch = spec.mobile && result.applied !== false;
+    return { ...result, mode: 'cdp' };
+  }
+
+  private async readViewport(): Promise<Metrics | undefined> {
+    const main = this.mainContext();
+    if (!main) return undefined;
+    return this.callApi<Metrics>(main.id, 'metrics', []);
+  }
+
+  private async holdEmulation(): Promise<void> {
+    if (!this.emulation) return;
+    const page = await this.requirePage();
+    const current = await this.readViewport().catch(() => undefined);
+    if (current && viewportMatches(this.emulation, current)) return;
+    await applyEmulation(this.emulation, {
+      send: (method, commandParams) => page.send(method, commandParams ?? {}),
+      readViewport: () => this.readViewport(),
     });
-    await page.send('Emulation.setTouchEmulationEnabled', {
-      enabled: spec.mobile,
-      maxTouchPoints: spec.mobile ? 5 : 1,
-    });
-    if (spec.userAgent) await page.send('Emulation.setUserAgentOverride', { userAgent: spec.userAgent });
-    this.touch = spec.mobile;
-    return {
-      preset: spec.preset,
-      width: spec.width,
-      height: spec.height,
-      deviceScaleFactor: spec.deviceScaleFactor,
-      mobile: spec.mobile,
-      touch: spec.mobile,
-      mode: 'cdp',
-    };
   }
 
   private async readConsole(params: Record<string, unknown>): Promise<unknown> {
@@ -568,14 +617,24 @@ export class DirectSession {
     return map;
   }
 
-  private async clickAt(x: number, y: number, contextId: number, localX: number, localY: number): Promise<Via> {
+  private async clickAt(
+    x: number,
+    y: number,
+    contextId: number,
+    localX: number,
+    localY: number,
+    requireTrusted = false,
+  ): Promise<{ via: Via; warning?: string }> {
     try {
+      await this.callApi(contextId, 'armClick', [localX, localY]).catch(() => undefined);
       await this.mouseClick(x, y);
-      return 'trusted';
+      return { via: 'trusted' };
     } catch (error) {
       if (!isInputFallbackError(error)) throw error;
+      const reason = error instanceof Error ? error.message : String(error);
+      if (requireTrusted) throw trustedInputRequiredError(reason);
       await this.callApi(contextId, 'syntheticClick', [localX, localY, this.touch ? 'touch' : 'mouse']);
-      return 'synthetic';
+      return { via: 'synthetic', warning: syntheticInputWarning(reason) };
     }
   }
 

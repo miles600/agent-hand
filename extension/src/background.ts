@@ -1,7 +1,19 @@
 import { viewportCssPoint } from '../../shared/coords.js';
-import { resolveEmulation } from '../../shared/emulate.js';
+import {
+  applyEmulation,
+  deviceMetricsOverride,
+  resolveEmulation,
+  viewportMatches,
+  type EmulationSpec,
+} from '../../shared/emulate.js';
 import { matchFrameRect, type FrameRect } from '../../shared/frames.js';
-import { INPUT_TIMEOUT_MS, isInputFallbackError } from '../../shared/input.js';
+import {
+  INPUT_TIMEOUT_MS,
+  isInputFallbackError,
+  requiresTrustedInput,
+  syntheticInputWarning,
+  trustedInputRequiredError,
+} from '../../shared/input.js';
 import { parseKeyCombo, type KeyDispatch } from '../../shared/keys.js';
 import {
   consoleFromCdp,
@@ -30,6 +42,9 @@ let lastError = 'Paste the bridge token on the options page';
 let selectedTabId: number | null = null;
 let refMap = new Map<number, RefRecord>();
 let touchEmulated = false;
+let activeEmulation: EmulationSpec | null = null;
+/** Set when attach is refused because DevTools already holds the debugger. */
+let lastAttachProblem = '';
 const attached = new Set<number>();
 const consoleByTab = new Map<number, ConsoleMessage[]>();
 const networkByTab = new Map<number, NetworkError[]>();
@@ -102,6 +117,11 @@ async function startup(): Promise<void> {
     await recallRefs();
   } catch {
     // session storage can be empty on a fresh install
+  }
+  try {
+    await recallEmulation();
+  } catch {
+    // same as above
   }
   try {
     await recallTab();
@@ -237,7 +257,7 @@ async function dispatch(method: string, params: Record<string, unknown>): Promis
     case 'type':
       return typeText(params);
     case 'press':
-      return press(requiredString(params.key, 'key'));
+      return press(requiredString(params.key, 'key'), requiresTrustedInput(params));
     case 'scroll':
       return scroll(params);
     case 'screenshot':
@@ -316,6 +336,7 @@ async function navigate(url: string): Promise<unknown> {
   await done;
   const fresh = await chrome.tabs.get(tabId);
   await focusTab(fresh);
+  await holdEmulation(tabId);
   return { tabId, url: fresh.url ?? url };
 }
 
@@ -324,6 +345,7 @@ async function snapshot(): Promise<unknown> {
   const tabId = tab.id as number;
   await focusTab(tab);
   const frames = await ensureReady(tabId);
+  await holdEmulation(tabId);
   const wanted = relevantFrames(frames);
   const collected: { frameId: number; elements: PageElement[] }[] = [];
   let mainOk = false;
@@ -388,10 +410,11 @@ async function click(params: Record<string, unknown>): Promise<unknown> {
   }
   await move;
   await cursorRipple(tabId);
-  const via = await clickAt(tabId, at.x, at.y, entry.frameId, at.localX, at.localY);
+  const delivered = await clickAt(tabId, at.x, at.y, entry.frameId, at.localX, at.localY, requiresTrustedInput(params));
   return {
+    ...(delivered.warning ? { warning: delivered.warning } : {}),
     ref,
-    via,
+    via: delivered.via,
     x: at.x,
     y: at.y,
     devicePixelRatio: at.devicePixelRatio,
@@ -411,11 +434,13 @@ async function typeText(params: Record<string, unknown>): Promise<unknown> {
   const at = await reveal(tabId, entry);
   await cursorMove(tabId, at.x, at.y, 'Type', durationOf(params));
   await cursorRipple(tabId);
-  const clickVia = await clickAt(tabId, at.x, at.y, entry.frameId, at.localX, at.localY);
+  const requireTrusted = requiresTrustedInput(params);
+  const clicked = await clickAt(tabId, at.x, at.y, entry.frameId, at.localX, at.localY, requireTrusted);
   await ask(tabId, entry.frameId, 'focus', { ahId: entry.ahId });
   await sleep(40);
   let via: 'trusted' | 'synthetic' = 'trusted';
-  if (clickVia !== 'trusted') {
+  let warning = clicked.warning;
+  if (clicked.via !== 'trusted') {
     via = 'synthetic';
     await setFieldValue(tabId, entry.frameId, entry.ahId, text);
   } else {
@@ -423,19 +448,29 @@ async function typeText(params: Record<string, unknown>): Promise<unknown> {
       await sendCommand(tabId, 'Input.insertText', { text });
     } catch (error) {
       if (!isInputFallbackError(error)) throw error;
+      const reason = inputReason(error);
+      if (requireTrusted) throw trustedInputRequiredError(reason);
       via = 'synthetic';
+      warning = syntheticInputWarning(reason);
       await restoreAttached(tabId);
       await setFieldValue(tabId, entry.frameId, entry.ahId, text);
     }
   }
   if (params.submit === true) {
     await cursorLabel(tabId, 'Submit');
-    await pressEnter(tabId, via);
+    await pressEnter(tabId, via, requireTrusted);
   }
-  return { ref, length: text.length, submitted: params.submit === true, via, clickVia };
+  return {
+    ...(warning ? { warning } : {}),
+    ref,
+    length: text.length,
+    submitted: params.submit === true,
+    via,
+    clickVia: clicked.via,
+  };
 }
 
-async function press(key: string): Promise<unknown> {
+async function press(key: string, requireTrusted = false): Promise<unknown> {
   const tab = await controllableTab();
   const tabId = tab.id as number;
   await focusTab(tab);
@@ -448,9 +483,11 @@ async function press(key: string): Promise<unknown> {
     return { key: parsed.key, via: 'trusted' };
   } catch (error) {
     if (!isInputFallbackError(error)) throw error;
+    const reason = inputReason(error);
+    if (requireTrusted) throw trustedInputRequiredError(reason);
     await restoreAttached(tabId);
     await deliverSyntheticKey(tabId, parsed);
-    return { key: parsed.key, via: 'synthetic' };
+    return { warning: syntheticInputWarning(reason), key: parsed.key, via: 'synthetic' };
   }
 }
 
@@ -477,9 +514,11 @@ async function scroll(params: Record<string, unknown>): Promise<unknown> {
     return { direction, amount, x: at.x, y: at.y, devicePixelRatio: metrics.devicePixelRatio, via: 'trusted' };
   } catch (error) {
     if (!isInputFallbackError(error)) throw error;
+    const reason = inputReason(error);
+    if (requiresTrustedInput(params)) throw trustedInputRequiredError(reason);
     await restoreAttached(tabId);
     await ask(tabId, 0, 'synthetic-scroll', { x: at.x, y: at.y, deltaX: delta.x, deltaY: delta.y });
-    return { direction, amount, x: at.x, y: at.y, devicePixelRatio: metrics.devicePixelRatio, via: 'synthetic' };
+    return { warning: syntheticInputWarning(reason), direction, amount, x: at.x, y: at.y, devicePixelRatio: metrics.devicePixelRatio, via: 'synthetic' };
   }
 }
 
@@ -692,13 +731,72 @@ function relevantFrames(frames: FrameInfo[]): FrameInfo[] {
   return [...main, ...rest];
 }
 
+async function holdEmulation(tabId: number): Promise<void> {
+  await recallEmulation();
+  if (!activeEmulation) return;
+  try {
+    await attachSettled(tabId);
+    if (lastAttachProblem) return;
+    const metrics = await ask<Metrics>(tabId, 0, 'metrics');
+    if (!viewportMatches(activeEmulation, metrics)) await sendEmulation(tabId, activeEmulation);
+  } catch {
+    // Snapshot still reports the viewport the page actually has.
+  }
+}
+
+async function sendEmulation(tabId: number, spec: EmulationSpec): Promise<void> {
+  await sendCommand(tabId, 'Emulation.setDeviceMetricsOverride', deviceMetricsOverride(spec), 5000);
+  await sendCommand(tabId, 'Emulation.setTouchEmulationEnabled', {
+    enabled: spec.mobile,
+    maxTouchPoints: spec.mobile ? 5 : 1,
+  }, 5000);
+  if (spec.userAgent) {
+    await sendCommand(tabId, 'Emulation.setUserAgentOverride', { userAgent: spec.userAgent }, 5000);
+  }
+  touchEmulated = spec.mobile;
+}
+
+async function persistEmulation(spec: EmulationSpec | null): Promise<void> {
+  activeEmulation = spec;
+  try {
+    await chrome.storage.session.set({ emulation: spec });
+  } catch {
+    // session storage can be unavailable
+  }
+}
+
+async function recallEmulation(): Promise<void> {
+  if (activeEmulation) return;
+  try {
+    const stored = await chrome.storage.session.get('emulation');
+    const value = stored.emulation;
+    if (!value || typeof value !== 'object') return;
+    const spec = value as EmulationSpec;
+    if (typeof spec.width !== 'number' || typeof spec.height !== 'number') return;
+    activeEmulation = spec;
+  } catch {
+    // ignore
+  }
+}
+
+function inputReason(error: unknown): string {
+  const reason = error instanceof Error ? error.message : String(error);
+  if (lastAttachProblem && !reason.includes(lastAttachProblem)) return `${lastAttachProblem}; ${reason}`;
+  return reason;
+}
+
 async function attachSettled(tabId: number): Promise<void> {
+  await recallEmulation();
   if (attached.has(tabId)) return;
+  lastAttachProblem = '';
   try {
     await debuggerAttach(tabId);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (!/already attached/i.test(message)) throw new Error(message);
+    // DevTools (docked or undocked) already owns the tab. Input.* will be
+    // refused immediately with "not attached"; it does not wait 2.5s.
+    lastAttachProblem = message;
   }
   for (const other of [...attached]) {
     if (other !== tabId) await detach(other);
@@ -706,6 +804,14 @@ async function attachSettled(tabId: number): Promise<void> {
   attached.add(tabId);
   await sleep(300);
   await enableMonitoring(tabId);
+  if (!activeEmulation) return;
+  try {
+    await sendEmulation(tabId, activeEmulation);
+    lastAttachProblem = '';
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!lastAttachProblem) lastAttachProblem = message;
+  }
 }
 
 function debuggerAttach(tabId: number): Promise<void> {
@@ -785,19 +891,24 @@ async function clickAt(
   frameId = 0,
   localX = x,
   localY = y,
-): Promise<'trusted' | 'synthetic'> {
+  requireTrusted = false,
+): Promise<{ via: 'trusted' | 'synthetic'; warning?: string }> {
   try {
+    await ask(tabId, frameId, 'arm-click', { x: localX, y: localY }, 1500).catch(() => undefined);
     await mouseClick(tabId, x, y);
-    return 'trusted';
+    lastAttachProblem = '';
+    return { via: 'trusted' };
   } catch (error) {
     if (!isInputFallbackError(error)) throw error;
+    const reason = inputReason(error);
+    if (requireTrusted) throw trustedInputRequiredError(reason);
     await restoreAttached(tabId);
     await ask(tabId, frameId, 'synthetic-click', {
       x: localX,
       y: localY,
       pointerType: touchEmulated ? 'touch' : 'mouse',
     });
-    return 'synthetic';
+    return { via: 'synthetic', warning: syntheticInputWarning(reason) };
   }
 }
 
@@ -812,8 +923,8 @@ async function clickXY(params: Record<string, unknown>): Promise<unknown> {
   await attachSettled(tabId);
   await cursorMove(tabId, x, y, 'Click', durationOf(params));
   await cursorRipple(tabId);
-  const via = await clickAt(tabId, x, y);
-  return { x, y, via };
+  const delivered = await clickAt(tabId, x, y, 0, x, y, requiresTrustedInput(params));
+  return { ...(delivered.warning ? { warning: delivered.warning } : {}), x, y, via: delivered.via };
 }
 
 async function locateText(text: string): Promise<unknown> {
@@ -829,9 +940,10 @@ async function setFieldValue(tabId: number, frameId: number, ahId: string, text:
   if (!ok) throw new Error('could not set the field value');
 }
 
-async function pressEnter(tabId: number, via: 'trusted' | 'synthetic'): Promise<void> {
+async function pressEnter(tabId: number, via: 'trusted' | 'synthetic', requireTrusted: boolean): Promise<void> {
   const enter = parseKeyCombo('Enter');
   if (via !== 'trusted') {
+    if (requireTrusted) throw trustedInputRequiredError('click was not trusted');
     await deliverSyntheticKey(tabId, enter);
     return;
   }
@@ -839,6 +951,7 @@ async function pressEnter(tabId: number, via: 'trusted' | 'synthetic'): Promise<
     await keyDownUp(tabId, enter);
   } catch (error) {
     if (!isInputFallbackError(error)) throw error;
+    if (requireTrusted) throw trustedInputRequiredError(inputReason(error));
     await restoreAttached(tabId);
     await deliverSyntheticKey(tabId, enter);
   }
@@ -864,37 +977,22 @@ async function emulate(params: Record<string, unknown>): Promise<unknown> {
   const tabId = tab.id as number;
   await focusTab(tab);
   await ensureReady(tabId);
-  await attachSettled(tabId);
   const spec = resolveEmulation(params);
   if (spec.preset === 'off') {
+    activeEmulation = null;
     touchEmulated = false;
-    await sendCommand(tabId, 'Emulation.clearDeviceMetricsOverride', {}, 5000);
-    await sendCommand(tabId, 'Emulation.setTouchEmulationEnabled', { enabled: false }, 5000);
-    await sendCommand(tabId, 'Emulation.setUserAgentOverride', { userAgent: '' }, 5000).catch(() => undefined);
-    return { preset: 'off', touch: false };
+    await persistEmulation(null);
   }
-  await sendCommand(tabId, 'Emulation.setDeviceMetricsOverride', {
-    width: spec.width,
-    height: spec.height,
-    deviceScaleFactor: spec.deviceScaleFactor,
-    mobile: spec.mobile,
-  }, 5000);
-  await sendCommand(tabId, 'Emulation.setTouchEmulationEnabled', {
-    enabled: spec.mobile,
-    maxTouchPoints: spec.mobile ? 5 : 1,
-  }, 5000);
-  if (spec.userAgent) {
-    await sendCommand(tabId, 'Emulation.setUserAgentOverride', { userAgent: spec.userAgent }, 5000);
-  }
-  touchEmulated = spec.mobile;
-  return {
-    preset: spec.preset,
-    width: spec.width,
-    height: spec.height,
-    deviceScaleFactor: spec.deviceScaleFactor,
-    mobile: spec.mobile,
-    touch: spec.mobile,
-  };
+  await attachSettled(tabId);
+  const result = await applyEmulation(spec, {
+    send: (method, commandParams) => sendCommand(tabId, method, commandParams, 5000),
+    readViewport: () => ask<Metrics>(tabId, 0, 'metrics'),
+  });
+  if (spec.preset === 'off') return result;
+  activeEmulation = spec;
+  touchEmulated = spec.mobile && result.applied !== false;
+  await persistEmulation(spec);
+  return result;
 }
 
 async function readConsole(params: Record<string, unknown>): Promise<unknown> {
@@ -1135,6 +1233,7 @@ function publicItem(item: SnapshotItem): Omit<SnapshotItem, 'ahId'> {
     width: item.width,
     height: item.height,
     disabled: item.disabled,
+    ...(item.checked == null ? {} : { checked: item.checked }),
   };
 }
 

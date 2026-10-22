@@ -1,0 +1,46 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { margin: 8px; font: 16px sans-serif; }
+    uni-picker, uni-view, uni-checkbox, uni-radio, .card, .parent-card, img { display: block; }
+    uni-picker, uni-view.date { width: 220px; height: 44px; margin-bottom: 8px; }
+    uni-picker input, uni-view.date input { width: 180px; height: 32px; }
+    uni-checkbox, uni-radio, [role="checkbox"] { display: block; width: 220px; height: 28px; margin-bottom: 8px; }
+    .roles { display: flex; gap: 8px; margin: 8px 0; }
+    .card, .parent-card { width: 120px; height: 88px; }
+    .card img, .parent-card img, img.guest { width: 96px; height: 56px; }
+    img.guest { cursor: pointer; margin-bottom: 8px; }
+    .parent-card { cursor: pointer; }
+    .pair { margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <uni-picker id="picker">
+    <input disabled readonly value="2024-01-02">
+  </uni-picker>
+  <uni-view class="date">
+    <input disabled readonly value="请选择日期">
+  </uni-view>
+  <uni-checkbox>
+    <span class="uni-checkbox-input uni-checkbox-input-checked"></span>
+    同意协议
+  </uni-checkbox>
+  <uni-radio>
+    <span class="uni-radio-input"></span>
+    否
+  </uni-radio>
+  <label>条款 <input id="native" type="checkbox" checked></label>
+  <div role="checkbox" aria-checked="false">未选</div>
+  <div class="roles">
+    <div class="card"><img alt="学生" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"><span>学生</span></div>
+    <div class="card"><img alt="教师" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"></div>
+  </div>
+  <img class="guest" alt="游客" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
+  <div class="pair">
+    <div class="parent-card"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"></div>
+    <span>家长</span>
+  </div>
+</body>
+</html>

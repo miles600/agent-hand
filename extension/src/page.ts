@@ -10,6 +10,7 @@ type PageElement = {
   width: number;
   height: number;
   disabled: boolean;
+  checked?: boolean | 'mixed';
 };
 type FrameRect = { src: string; x: number; y: number; width: number; height: number };
 type LocateHit = { text: string; tag: string; x: number; y: number; width: number; height: number };
@@ -27,6 +28,8 @@ export type PageApi = {
   text: () => string;
   pageInfo: () => { href: string; title: string };
   syntheticClick: (x: number, y: number, pointerType?: string) => { tag: string; text: string } | null;
+  /** Drop pointer-events on a disabled picker field so a trusted click hits its wrapper. */
+  armClick: (x: number, y: number) => void;
   locate: (text: string) => LocateHit[];
   setValue: (ahId: string, value: string) => boolean;
   syntheticKey: (spec: KeySpec, force?: boolean) => { acted: boolean };
@@ -114,6 +117,7 @@ export function installPageApi(): PageApi {
     text,
     pageInfo,
     syntheticClick,
+    armClick,
     locate,
     setValue,
     syntheticKey,
@@ -129,27 +133,53 @@ function collect(): { elements: PageElement[] } {
   const next = new Map<string, Element>();
   const elements: PageElement[] = [];
   const seen = new Set<Element>();
-  const add = (el: Element, role?: string) => {
-    if (seen.has(el) || elements.length >= MAX_SNAPSHOT_ITEMS) return;
+  const indexOf = new Map<Element, number>();
+  const add = (el: Element, role?: string, name?: string, boxFrom?: Element) => {
+    const resolvedRole = role ?? roleOf(el);
+    const resolvedName = name ?? accessibleName(el);
+    if (seen.has(el)) {
+      const index = indexOf.get(el);
+      if (index == null) return;
+      if (resolvedName && !elements[index].name) elements[index].name = resolvedName;
+      return;
+    }
+    if (elements.length >= MAX_SNAPSHOT_ITEMS) return;
     seen.add(el);
     const id = idFor(el);
     next.set(id, el);
-    const rect = el.getBoundingClientRect();
-    elements.push({
+    const rect = visibleBox(el, boxFrom);
+    const item: PageElement = {
       ahId: id,
-      role: role ?? roleOf(el),
-      name: accessibleName(el),
+      role: resolvedRole,
+      name: resolvedName,
       x: rect.left,
       y: rect.top,
       width: rect.width,
       height: rect.height,
       disabled: isDisabled(el),
-    });
+    };
+    const checked = checkedOf(el, resolvedRole);
+    if (checked !== undefined) item.checked = checked;
+    indexOf.set(el, elements.length);
+    elements.push(item);
   };
   for (const el of document.querySelectorAll(SELECTOR)) {
     if (elements.length >= MAX_SNAPSHOT_ITEMS) break;
     if (!isCandidate(el)) continue;
+    const lifted = liftField(el);
+    if (lifted) {
+      add(lifted.host, lifted.role, lifted.name, el);
+      continue;
+    }
     add(el);
+  }
+  if (elements.length < MAX_SNAPSHOT_ITEMS) {
+    for (const img of document.querySelectorAll('img, uni-image, [role="img"]')) {
+      if (elements.length >= MAX_SNAPSHOT_ITEMS) break;
+      const card = imageCard(img);
+      if (!card || seen.has(card) || !isCandidate(card)) continue;
+      add(card, 'clickable', nameForCard(card, img));
+    }
   }
   if (elements.length < MAX_SNAPSHOT_ITEMS && document.body) {
     for (const el of document.body.querySelectorAll('*')) {
@@ -172,10 +202,11 @@ function prepare(ahId: string): Promise<Box | { error: string }> {
   const el = byId.get(ahId);
   if (!el || !el.isConnected) return Promise.resolve({ error: 'element is gone; take a new snapshot' });
   el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' });
+  suppressBlockedFields(el);
   return new Promise((resolve) => {
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        const rect = el.getBoundingClientRect();
+        const rect = visibleBox(el);
         if (rect.width < 1 || rect.height < 1) {
           resolve({ error: 'element has no box after scroll' });
           return;
@@ -259,11 +290,8 @@ function pageInfo(): { href: string; title: string } {
 }
 
 function syntheticClick(x: number, y: number, pointerType = 'mouse'): { tag: string; text: string } | null {
-  const restore = hideOverlays();
-  const el = document.elementFromPoint(x, y);
-  restore();
-  if (!(el instanceof HTMLElement) && !(el instanceof SVGElement)) return null;
-  const target = el;
+  const target = hitTarget(x, y);
+  if (!(target instanceof HTMLElement) && !(target instanceof SVGElement)) return null;
   const init = { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y, view: window, button: 0 };
   if (pointerType === 'touch') {
     target.dispatchEvent(new PointerEvent('pointerdown', { ...init, pointerId: 1, pointerType: 'touch', isPrimary: true }));
@@ -558,7 +586,11 @@ function accessibleName(el: Element): string {
   if (el instanceof HTMLInputElement && (el.type === 'submit' || el.type === 'button') && el.value) {
     return clean(el.value);
   }
-  return clean((el as HTMLElement).innerText || el.textContent || '');
+  const text = clean((el as HTMLElement).innerText || el.textContent || '');
+  if (text) return text;
+  const fromImage = imageAlt(el);
+  if (fromImage) return fromImage;
+  return nearbyLabel(el);
 }
 
 function clean(value: string): string {
@@ -575,6 +607,253 @@ function isDisabled(el: Element): boolean {
     if (el.disabled) return true;
   }
   return el.getAttribute('aria-disabled') === 'true';
+}
+
+let suppressedRestore: (() => void) | null = null;
+
+function visibleBox(el: Element, fallback?: Element): { left: number; top: number; width: number; height: number } {
+  const rect = el.getBoundingClientRect();
+  if (rect.width >= 2 && rect.height >= 2) return rect;
+  if (fallback) {
+    const inner = fallback.getBoundingClientRect();
+    if (inner.width >= 2 && inner.height >= 2) return inner;
+  }
+  const nested = el.querySelector('input, textarea, button, img');
+  if (nested) {
+    const inner = nested.getBoundingClientRect();
+    if (inner.width >= 2 && inner.height >= 2) return inner;
+  }
+  return rect;
+}
+
+function liftField(el: Element): { host: Element; role: string; name: string } | null {
+  if (!isBlockedTextField(el)) return null;
+  const host = pickerHost(el);
+  if (!host || host === el) return null;
+  const role = isPickerish(host) ? 'combobox' : 'clickable';
+  return { host, role, name: fieldFaceName(host, el) };
+}
+
+function fieldFaceName(host: Element, field: Element): string {
+  if (field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement) {
+    const value = field.value.trim();
+    if (value) return clean(value);
+  }
+  return accessibleName(field) || accessibleName(host) || field.getAttribute('placeholder') || '';
+}
+
+function isBlockedTextField(el: Element): boolean {
+  if (!(el instanceof HTMLInputElement) && !(el instanceof HTMLTextAreaElement)) return false;
+  const type = (el instanceof HTMLInputElement ? el.type : 'text').toLowerCase();
+  if (['hidden', 'checkbox', 'radio', 'button', 'submit', 'reset', 'file', 'image', 'range'].includes(type)) return false;
+  return el.disabled || el.readOnly || el.hasAttribute('readonly') || el.getAttribute('aria-disabled') === 'true' || el.getAttribute('aria-readonly') === 'true';
+}
+
+function pickerHost(el: Element): Element | null {
+  const inputRect = el.getBoundingClientRect();
+  let node = el.parentElement;
+  let depth = 0;
+  let uniCandidate: Element | null = null;
+  while (node && node !== document.body && node !== document.documentElement && depth < 8) {
+    if (isPickerHost(node)) return node;
+    const tag = node.tagName.toLowerCase();
+    if (!uniCandidate && (tag === 'uni-view' || tag === 'view')) {
+      const rect = node.getBoundingClientRect();
+      if (
+        rect.height >= 2
+        && rect.height <= Math.max(96, inputRect.height * 3)
+        && rect.width <= Math.max(480, inputRect.width * 2)
+      ) {
+        uniCandidate = node;
+      }
+    }
+    node = node.parentElement;
+    depth += 1;
+  }
+  return uniCandidate;
+}
+
+function isPickerHost(el: Element): boolean {
+  const tag = el.tagName.toLowerCase();
+  if (tag === 'uni-picker' || tag === 'uni-datetime-picker' || tag === 'uni-data-picker') return true;
+  if (el.classList.contains('uni-date-editor') || el.classList.contains('uni-date') || el.classList.contains('uni-picker')) return true;
+  if (el.hasAttribute('onclick')) return true;
+  const role = el.getAttribute('role');
+  if (role === 'button' || role === 'combobox') return true;
+  return el instanceof HTMLElement && getComputedStyle(el).cursor === 'pointer';
+}
+
+function isPickerish(el: Element): boolean {
+  const tag = el.tagName.toLowerCase();
+  return tag === 'uni-picker'
+    || tag === 'uni-datetime-picker'
+    || tag === 'uni-data-picker'
+    || el.classList.contains('uni-date-editor')
+    || el.classList.contains('uni-date')
+    || el.classList.contains('uni-picker');
+}
+
+function imageCard(img: Element): Element | null {
+  if (img.closest(`#${OVERLAY_ID}`)) return null;
+  if (img.closest('button, a[href], [role="button"], uni-button, uni-picker')) return null;
+  if (isClickableHint(img)) return img;
+  const hinted = clickableHintAncestor(img);
+  if (hinted) return hinted;
+  let node = img.parentElement;
+  while (node && node !== document.body) {
+    if (looksLikeTile(node) && hasImageSibling(node)) return node;
+    node = node.parentElement;
+  }
+  return null;
+}
+
+function isClickableHint(el: Element): boolean {
+  if (el.hasAttribute('onclick')) return true;
+  const role = el.getAttribute('role');
+  if (role === 'button' || role === 'link') return true;
+  return el instanceof HTMLElement && getComputedStyle(el).cursor === 'pointer';
+}
+
+function clickableHintAncestor(el: Element): Element | null {
+  let node = el.parentElement;
+  while (node && node !== document.body && node !== document.documentElement) {
+    if (isClickableHint(node)) return node;
+    node = node.parentElement;
+  }
+  return null;
+}
+
+function looksLikeTile(el: Element): boolean {
+  const rect = el.getBoundingClientRect();
+  return rect.width >= 24 && rect.height >= 24 && rect.width <= 480 && rect.height <= 640;
+}
+
+function hasImageSibling(el: Element): boolean {
+  const parent = el.parentElement;
+  if (!parent) return false;
+  let count = 0;
+  for (const child of parent.children) {
+    const tag = child.tagName.toLowerCase();
+    if (child === el || tag === 'img' || tag === 'uni-image' || child.querySelector('img, uni-image')) count += 1;
+    if (count >= 2) return true;
+  }
+  return false;
+}
+
+function nameForCard(card: Element, img: Element): string {
+  const own = accessibleName(card);
+  if (own) return own;
+  const alt = img.getAttribute('alt') || img.getAttribute('aria-label') || '';
+  if (alt.trim()) return clean(alt);
+  return nearbyLabel(card) || nearbyLabel(img);
+}
+
+function imageAlt(el: Element): string {
+  if (el.matches('img, uni-image, [role="img"]')) {
+    const own = el.getAttribute('alt') || el.getAttribute('aria-label') || '';
+    if (own.trim()) return clean(own);
+  }
+  for (const img of el.querySelectorAll('img, uni-image, [role="img"]')) {
+    const alt = img.getAttribute('alt') || img.getAttribute('aria-label') || '';
+    if (alt.trim()) return clean(alt);
+  }
+  return '';
+}
+
+function nearbyLabel(el: Element): string {
+  for (const sib of [el.previousElementSibling, el.nextElementSibling]) {
+    if (!sib) continue;
+    const text = clean(sib.textContent || '');
+    if (text && text.length <= 40) return text;
+  }
+  return '';
+}
+
+function checkedOf(el: Element, role: string): boolean | 'mixed' | undefined {
+  if (role !== 'checkbox' && role !== 'radio' && role !== 'switch') return undefined;
+  const aria = el.getAttribute('aria-checked');
+  if (aria === 'mixed') return 'mixed';
+  if (aria === 'true') return true;
+  if (aria === 'false') return false;
+  if (el instanceof HTMLInputElement && (el.type === 'checkbox' || el.type === 'radio')) return el.checked;
+  if (el.matches('.uni-checkbox-input-checked, .uni-radio-input-checked, .uni-switch-input-checked')) return true;
+  if (el.querySelector('.uni-checkbox-input-checked, .uni-radio-input-checked, .uni-switch-input-checked')) return true;
+  const tag = el.tagName.toLowerCase();
+  if (tag === 'uni-checkbox' || tag === 'uni-radio' || tag === 'uni-switch') return false;
+  if (el.querySelector('.uni-checkbox-input, .uni-radio-input, .uni-switch-input')) return false;
+  const inner = el.querySelector('input[type="checkbox"], input[type="radio"]');
+  if (inner instanceof HTMLInputElement) return inner.checked;
+  return undefined;
+}
+
+function armClick(x: number, y: number): void {
+  const restoreOverlay = hideOverlays();
+  const el = document.elementFromPoint(x, y);
+  restoreOverlay();
+  if (!(el instanceof HTMLElement) || !isBlockedTextField(el) || !pickerHost(el)) return;
+  suppressElement(el);
+}
+
+function hitTarget(x: number, y: number): Element | null {
+  const restoreOverlay = hideOverlays();
+  let el = document.elementFromPoint(x, y);
+  restoreOverlay();
+  if (!(el instanceof HTMLElement) || !isBlockedTextField(el)) return el;
+  const host = pickerHost(el);
+  if (!host) return el;
+  suppressElement(el);
+  const again = hideOverlays();
+  const under = document.elementFromPoint(x, y);
+  again();
+  if (under && under !== el) return under;
+  return host;
+}
+
+function suppressBlockedFields(root: Element): void {
+  const fields = [...root.querySelectorAll('input, textarea')].filter(isBlockedTextField);
+  if (isBlockedTextField(root)) fields.unshift(root);
+  if (!fields.length) return;
+  restoreSuppressed();
+  const saved = fields.map((node) => {
+    const style = (node as HTMLElement).style;
+    const prev = style.pointerEvents;
+    const priority = style.getPropertyPriority('pointer-events');
+    style.setProperty('pointer-events', 'none', 'important');
+    return { node: node as HTMLElement, prev, priority };
+  });
+  const restore = () => {
+    for (const item of saved) {
+      if (item.prev) item.node.style.setProperty('pointer-events', item.prev, item.priority);
+      else item.node.style.removeProperty('pointer-events');
+    }
+    if (suppressedRestore === restore) suppressedRestore = null;
+  };
+  suppressedRestore = restore;
+  window.setTimeout(() => {
+    if (suppressedRestore === restore) restore();
+  }, 1500);
+}
+
+function suppressElement(el: HTMLElement): void {
+  restoreSuppressed();
+  const prev = el.style.pointerEvents;
+  const priority = el.style.getPropertyPriority('pointer-events');
+  el.style.setProperty('pointer-events', 'none', 'important');
+  const restore = () => {
+    if (prev) el.style.setProperty('pointer-events', prev, priority);
+    else el.style.removeProperty('pointer-events');
+    if (suppressedRestore === restore) suppressedRestore = null;
+  };
+  suppressedRestore = restore;
+  window.setTimeout(() => {
+    if (suppressedRestore === restore) restore();
+  }, 1500);
+}
+
+function restoreSuppressed(): void {
+  const restore = suppressedRestore;
+  suppressedRestore = null;
+  restore?.();
 }
 
 function ensureCursor(): void {
