@@ -76,6 +76,21 @@ function installListener(api: PageApi): void {
       });
       return undefined;
     }
+    if (msg.type === 'synthetic-hover') {
+      sendResponse({ ok: true, result: api.syntheticHover(Number(msg.x), Number(msg.y)) });
+      return undefined;
+    }
+    if (msg.type === 'synthetic-dblclick') {
+      sendResponse({
+        ok: true,
+        result: api.syntheticDblclick(Number(msg.x), Number(msg.y), typeof msg.pointerType === 'string' ? msg.pointerType : 'mouse'),
+      });
+      return undefined;
+    }
+    if (msg.type === 'synthetic-right-click') {
+      sendResponse({ ok: true, result: api.syntheticRightClick(Number(msg.x), Number(msg.y)) });
+      return undefined;
+    }
     if (msg.type === 'arm-click') {
       api.armClick(Number(msg.x), Number(msg.y));
       sendResponse({ ok: true });
@@ -87,6 +102,21 @@ function installListener(api: PageApi): void {
     }
     if (msg.type === 'set-value') {
       sendResponse({ ok: true, result: api.setValue(String(msg.ahId), String(msg.text ?? '')) });
+      return undefined;
+    }
+    if (msg.type === 'select-contents') {
+      sendResponse({ ok: true, result: api.selectContents(String(msg.ahId)) });
+      return undefined;
+    }
+    if (msg.type === 'select-option') {
+      sendResponse({
+        ok: true,
+        result: api.selectOption(String(msg.ahId), String(msg.value ?? ''), msg.opened === true, msg.apply !== false),
+      });
+      return undefined;
+    }
+    if (msg.type === 'resource-timing') {
+      sendResponse({ ok: true, result: api.resourceTiming() });
       return undefined;
     }
     if (msg.type === 'synthetic-key') {

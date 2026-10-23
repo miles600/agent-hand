@@ -10,7 +10,22 @@
  */
 export const INPUT_TIMEOUT_MS = 2500;
 
-export const TRUSTED_INPUT_METHODS = new Set(['click', 'type', 'press', 'scroll', 'click_xy']);
+export const TRUSTED_INPUT_METHODS = new Set([
+  'click',
+  'click_xy',
+  'hover',
+  'hover_xy',
+  'dblclick',
+  'dblclick_xy',
+  'right_click',
+  'right_click_xy',
+  'type',
+  'clear',
+  'fill',
+  'press',
+  'scroll',
+  'select',
+]);
 
 /**
  * True when trusted CDP input cannot be delivered and the caller should use DOM events.

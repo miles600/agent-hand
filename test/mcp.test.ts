@@ -32,6 +32,9 @@ test('mcp stdio lists tools and can wait without an extension', async () => {
     assert.ok(names.includes('snapshot'));
     assert.ok(names.includes('click'));
     assert.ok(names.includes('screenshot'));
+    for (const name of ['hover', 'dblclick', 'right_click', 'clear', 'fill', 'select', 'wait_for_text', 'wait_for_url', 'wait_for_idle']) {
+      assert.ok(names.includes(name), name);
+    }
 
     proc.stdin.write(frame({
       jsonrpc: '2.0',

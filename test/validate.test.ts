@@ -40,4 +40,31 @@ test('normalizes the commands an agent sends', () => {
   assert.deepEqual(normalizeCall('select_tab', { tabId: 'TARGET-1' }).params, { tabId: 'TARGET-1' });
   assert.throws(() => normalizeCall('attach_cdp', { url: 'http://example.com:9222' }), /loopback/);
   assert.throws(() => normalizeCall('click_xy', { x: -1, y: 1 }), /CSS pixels/);
+  assert.deepEqual(normalizeCall('hover', { ref: '3' }), { method: 'hover', params: { ref: 3 } });
+  assert.deepEqual(normalizeCall('dblclick_xy', { x: 1, y: 2 }), { method: 'dblclick_xy', params: { x: 1, y: 2 } });
+  assert.deepEqual(normalizeCall('right_click', { ref: 4, requireTrusted: true }), {
+    method: 'right_click',
+    params: { ref: 4, requireTrusted: true },
+  });
+  assert.deepEqual(normalizeCall('fill', { ref: 2, text: 'Paris' }), {
+    method: 'fill',
+    params: { ref: 2, text: 'Paris', submit: false },
+  });
+  assert.deepEqual(normalizeCall('clear', { ref: 2 }), { method: 'clear', params: { ref: 2 } });
+  assert.deepEqual(normalizeCall('select', { ref: 5, value: ' Green ' }), {
+    method: 'select',
+    params: { ref: 5, value: 'Green' },
+  });
+  assert.deepEqual(normalizeCall('wait_for_text', { text: 'Ready' }), {
+    method: 'wait_for_text',
+    params: { text: 'Ready', timeout: 10000 },
+  });
+  assert.deepEqual(normalizeCall('wait_for_url', { url: '/ready/i', timeout: '1500' }), {
+    method: 'wait_for_url',
+    params: { url: '/ready/i', timeout: 1500 },
+  });
+  assert.deepEqual(normalizeCall('wait_for_idle', {}), { method: 'wait_for_idle', params: { timeout: 10000 } });
+  assert.throws(() => normalizeCall('wait_for_url', { url: '/[/' }), /invalid url pattern/);
+  assert.throws(() => normalizeCall('wait_for_idle', { timeout: 60001 }), /timeout out of range/);
+  assert.throws(() => normalizeCall('select', { ref: 1, value: '   ' }), /value is required/);
 });

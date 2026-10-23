@@ -12,6 +12,7 @@ import {
   type WindowState,
 } from '../../shared/emulate.js';
 import { matchFrameRect, type FrameRect } from '../../shared/frames.js';
+import { nativeSelectTrustedError, readSelectPlan } from '../../shared/actions.js';
 import {
   INPUT_TIMEOUT_MS,
   isInputFallbackError,
@@ -22,14 +23,29 @@ import {
 import { parseKeyCombo, type KeyDispatch } from '../../shared/keys.js';
 import {
   consoleFromCdp,
+  createInflight,
+  inflightQuiet,
   mergeConsole,
   networkFromCdp,
   pushCapped,
+  trackInflight,
   type ConsoleMessage,
+  type Inflight,
   type NetworkError,
 } from '../../shared/monitor.js';
+import { dispatchPointer, pointerLabel, type PointerKind } from '../../shared/pointer.js';
 import { DEFAULT_CURSOR_MS, DEFAULT_PORT } from '../../shared/protocol.js';
 import { sleep } from '../../shared/sleep.js';
+import {
+  NETWORK_IDLE_QUIET_MS,
+  RESOURCE_IDLE_WARNING,
+  networkIdleTimeout,
+  pollUntil,
+  resourceIdleTimeout,
+  textTimeout,
+  urlMatches,
+  urlTimeout,
+} from '../../shared/wait.js';
 import { buildSnapshot, type RawElement, type SnapshotItem } from '../../shared/snapshot.js';
 import {
   nextScreenshotScale,
@@ -62,6 +78,7 @@ const attached = new Set<number>();
 const consoleByTab = new Map<number, ConsoleMessage[]>();
 const networkByTab = new Map<number, NetworkError[]>();
 const requestUrls = new Map<number, Map<string, string>>();
+const inflightByTab = new Map<number, Inflight>();
 
 void startup();
 
@@ -99,11 +116,15 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   attached.delete(tabId);
+  inflightByTab.delete(tabId);
   if (selectedTabId === tabId) selectedTabId = null;
 });
 
 chrome.debugger.onDetach.addListener((source) => {
-  if (source.tabId != null) attached.delete(source.tabId);
+  if (source.tabId != null) {
+    attached.delete(source.tabId);
+    inflightByTab.delete(source.tabId);
+  }
 });
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
@@ -123,6 +144,9 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
     pushCapped(list, failure);
     networkByTab.set(tabId, list);
   }
+  const inflight = inflightByTab.get(tabId) ?? createInflight();
+  inflightByTab.set(tabId, inflight);
+  trackInflight(inflight, method, params);
 });
 
 async function startup(): Promise<void> {
@@ -267,8 +291,20 @@ async function dispatch(method: string, params: Record<string, unknown>): Promis
       return snapshot();
     case 'click':
       return click(params);
+    case 'hover':
+      return pointerRef(params, 'hover');
+    case 'dblclick':
+      return pointerRef(params, 'double');
+    case 'right_click':
+      return pointerRef(params, 'right');
     case 'type':
       return typeText(params);
+    case 'clear':
+      return fillText(params, 'clear');
+    case 'fill':
+      return fillText(params, 'fill');
+    case 'select':
+      return chooseOption(params);
     case 'press':
       return press(requiredString(params.key, 'key'), requiresTrustedInput(params));
     case 'scroll':
@@ -279,6 +315,12 @@ async function dispatch(method: string, params: Record<string, unknown>): Promis
       return getText(typeof params.max === 'number' ? params.max : 8000);
     case 'click_xy':
       return clickXY(params);
+    case 'hover_xy':
+      return pointerXY(params, 'hover');
+    case 'dblclick_xy':
+      return pointerXY(params, 'double');
+    case 'right_click_xy':
+      return pointerXY(params, 'right');
     case 'locate':
       return locateText(requiredString(params.text, 'text'));
     case 'emulate':
@@ -289,6 +331,12 @@ async function dispatch(method: string, params: Record<string, unknown>): Promis
       return readNetwork(params);
     case 'reload_extension':
       return reloadExtension();
+    case 'wait_for_text':
+      return waitForText(params);
+    case 'wait_for_url':
+      return waitForUrl(params);
+    case 'wait_for_idle':
+      return waitForIdle(params);
     default:
       throw new Error(`unknown method: ${method}`);
   }
@@ -481,6 +529,238 @@ async function typeText(params: Record<string, unknown>): Promise<unknown> {
     via,
     clickVia: clicked.via,
   };
+}
+
+async function fillText(params: Record<string, unknown>, mode: 'fill' | 'clear'): Promise<unknown> {
+  const ref = requiredInt(params.ref, 'ref');
+  const text = mode === 'clear' ? '' : requiredString(params.text, 'text');
+  const tab = await controllableTab();
+  const tabId = tab.id as number;
+  await focusTab(tab);
+  await ensureReady(tabId);
+  await attachSettled(tabId);
+  const entry = await refEntry(ref);
+  const at = await reveal(tabId, entry);
+  await cursorMove(tabId, at.x, at.y, mode === 'clear' ? 'Clear' : 'Fill', durationOf(params));
+  await cursorRipple(tabId);
+  const requireTrusted = requiresTrustedInput(params);
+  const clicked = await clickAt(tabId, at.x, at.y, entry.frameId, at.localX, at.localY, requireTrusted);
+  await ask(tabId, entry.frameId, 'focus', { ahId: entry.ahId });
+  await sleep(40);
+  let via: 'trusted' | 'synthetic' = 'trusted';
+  let warning = clicked.warning;
+  const writeSynthetic = async () => {
+    await setFieldValue(tabId, entry.frameId, entry.ahId, text);
+  };
+  if (clicked.via !== 'trusted') {
+    via = 'synthetic';
+    await writeSynthetic();
+  } else {
+    const selected = await ask<boolean>(tabId, entry.frameId, 'select-contents', { ahId: entry.ahId });
+    if (!selected) {
+      if (requireTrusted) throw new Error('clear and fill need an input, textarea, or contenteditable');
+      via = 'synthetic';
+      warning = warning ?? 'The field contents could not be selected, so the value was set in the page.';
+      await writeSynthetic();
+    } else {
+      try {
+        await keyDownUp(tabId, parseKeyCombo('Backspace'));
+        if (text) await sendCommand(tabId, 'Input.insertText', { text });
+      } catch (error) {
+        if (!isInputFallbackError(error)) throw error;
+        const reason = inputReason(error);
+        if (requireTrusted) throw trustedInputRequiredError(reason);
+        via = 'synthetic';
+        warning = syntheticInputWarning(reason);
+        await restoreAttached(tabId);
+        await writeSynthetic();
+      }
+    }
+  }
+  if (mode === 'fill' && params.submit === true) {
+    await cursorLabel(tabId, 'Submit');
+    await pressEnter(tabId, via, requireTrusted);
+  }
+  return {
+    ...(warning ? { warning } : {}),
+    ref,
+    length: text.length,
+    ...(mode === 'clear' ? { cleared: true } : { submitted: params.submit === true }),
+    via,
+    clickVia: clicked.via,
+  };
+}
+
+async function chooseOption(params: Record<string, unknown>): Promise<unknown> {
+  const ref = requiredInt(params.ref, 'ref');
+  const value = requiredString(params.value, 'value');
+  const requireTrusted = requiresTrustedInput(params);
+  const tab = await controllableTab();
+  const tabId = tab.id as number;
+  await focusTab(tab);
+  await ensureReady(tabId);
+  await attachSettled(tabId);
+  const entry = await refEntry(ref);
+  const at = await reveal(tabId, entry);
+  await cursorMove(tabId, at.x, at.y, 'Select', durationOf(params));
+  const originX = at.x - at.localX;
+  const originY = at.y - at.localY;
+  let opened = false;
+  for (let round = 0; round < 2; round += 1) {
+    const plan = readSelectPlan(await ask(tabId, entry.frameId, 'select-option', {
+      ahId: entry.ahId,
+      value,
+      opened,
+      apply: !requireTrusted,
+    }));
+    if (plan.action === 'error') throw new Error(plan.error || 'select failed');
+    if (plan.action === 'native') {
+      if (requireTrusted) throw nativeSelectTrustedError();
+      return { ref, via: 'synthetic', kind: 'native', value: plan.value, label: plan.label };
+    }
+    if (plan.action === 'open') {
+      if (round === 1) throw new Error('option list did not open');
+      await cursorRipple(tabId);
+      const click = await clickAt(tabId, at.x, at.y, entry.frameId, at.localX, at.localY, requireTrusted);
+      if (click.warning && requireTrusted) throw trustedInputRequiredError(click.warning);
+      opened = true;
+      await sleep(200);
+      continue;
+    }
+    const localX = typeof plan.x === 'number' ? plan.x : at.localX;
+    const localY = typeof plan.y === 'number' ? plan.y : at.localY;
+    const x = localX + originX;
+    const y = localY + originY;
+    await cursorMove(tabId, x, y, 'Choose', durationOf(params));
+    await cursorRipple(tabId);
+    const delivered = await clickAt(tabId, x, y, entry.frameId, localX, localY, requireTrusted);
+    return {
+      ...(delivered.warning ? { warning: delivered.warning } : {}),
+      ref,
+      via: delivered.via,
+      kind: 'click',
+      value,
+      label: plan.label,
+      x,
+      y,
+    };
+  }
+  throw new Error('select failed');
+}
+
+async function waitForText(params: Record<string, unknown>): Promise<unknown> {
+  const text = requiredString(params.text, 'text');
+  const timeout = timeoutOf(params);
+  const tab = await controllableTab();
+  const tabId = tab.id as number;
+  let last = '';
+  const waited = await pollUntil(timeout, 200, async () => {
+    last = await pageText(tabId);
+    return last.includes(text);
+  });
+  if (waited < 0) throw textTimeout(timeout, text);
+  return { found: true, waited };
+}
+
+async function waitForUrl(params: Record<string, unknown>): Promise<unknown> {
+  const pattern = requiredString(params.url, 'url');
+  const timeout = timeoutOf(params);
+  const tab = await controllableTab();
+  const tabId = tab.id as number;
+  let href = '';
+  const waited = await pollUntil(timeout, 200, async () => {
+    href = await pageHref(tabId);
+    return urlMatches(href, pattern);
+  });
+  if (waited < 0) throw urlTimeout(timeout, pattern, href);
+  return { url: href, waited };
+}
+
+async function waitForIdle(params: Record<string, unknown>): Promise<unknown> {
+  const timeout = timeoutOf(params);
+  const tab = await controllableTab();
+  const tabId = tab.id as number;
+  await focusTab(tab);
+  await ensureReady(tabId);
+  try {
+    await attachSettled(tabId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/already attached|not attached/i.test(message)) throw error;
+    lastAttachProblem = message;
+  }
+  if (lastAttachProblem) return waitForResourceIdle(tabId, timeout);
+  const state = inflightFor(tabId);
+  const started = Date.now();
+  const deadline = started + timeout;
+  while (true) {
+    const now = Date.now();
+    if (inflightQuiet(state, NETWORK_IDLE_QUIET_MS, now)) {
+      return { idle: true, via: 'network', waited: now - started, quietMs: NETWORK_IDLE_QUIET_MS, inflight: 0 };
+    }
+    if (now >= deadline) throw networkIdleTimeout(timeout, state.ids.size);
+    await sleep(Math.min(100, deadline - now));
+  }
+}
+
+async function waitForResourceIdle(tabId: number, timeout: number): Promise<unknown> {
+  let lastCount = -1;
+  let stableSince = 0;
+  const started = Date.now();
+  const deadline = started + timeout;
+  while (true) {
+    const now = Date.now();
+    const sample = await ask<{ readyState: string; resources: number }>(tabId, 0, 'resource-timing');
+    if (sample.resources !== lastCount || sample.readyState !== 'complete') {
+      lastCount = sample.resources;
+      stableSince = now;
+    } else if (now - stableSince >= NETWORK_IDLE_QUIET_MS) {
+      return {
+        idle: true,
+        via: 'resource-timing',
+        waited: now - started,
+        quietMs: NETWORK_IDLE_QUIET_MS,
+        warning: RESOURCE_IDLE_WARNING,
+      };
+    }
+    if (now >= deadline) throw resourceIdleTimeout(timeout);
+    await sleep(Math.min(100, deadline - now));
+  }
+}
+
+async function pageText(tabId: number): Promise<string> {
+  const frames = await ensureReady(tabId);
+  const parts: string[] = [];
+  for (const frame of relevantFrames(frames)) {
+    try {
+      const value = await ask<string>(tabId, frame.frameId, 'text', {}, 4000);
+      if (value) parts.push(value);
+    } catch {
+      // skip frames that cannot answer
+    }
+  }
+  return parts.join('\n\n');
+}
+
+async function pageHref(tabId: number): Promise<string> {
+  try {
+    const info = await ask<{ href?: string }>(tabId, 0, 'page-info', {}, 4000);
+    if (info?.href) return info.href;
+  } catch {
+    // fall through to the tab url
+  }
+  const tab = await chrome.tabs.get(tabId);
+  return tab.url ?? '';
+}
+
+function inflightFor(tabId: number): Inflight {
+  const state = inflightByTab.get(tabId) ?? createInflight();
+  inflightByTab.set(tabId, state);
+  return state;
+}
+
+function timeoutOf(params: Record<string, unknown>): number {
+  return typeof params.timeout === 'number' ? params.timeout : 10000;
 }
 
 async function press(key: string, requireTrusted = false): Promise<unknown> {
@@ -939,9 +1219,61 @@ async function clickAt(
   localY = y,
   requireTrusted = false,
 ): Promise<{ via: 'trusted' | 'synthetic'; warning?: string }> {
+  return pointerAt(tabId, x, y, frameId, localX, localY, 'click', requireTrusted);
+}
+
+async function pointerRef(params: Record<string, unknown>, kind: PointerKind): Promise<unknown> {
+  const ref = requiredInt(params.ref, 'ref');
+  const tab = await controllableTab();
+  const tabId = tab.id as number;
+  await focusTab(tab);
+  await ensureReady(tabId);
+  await attachSettled(tabId);
+  const entry = await refEntry(ref);
+  const at = await reveal(tabId, entry);
+  await cursorMove(tabId, at.x, at.y, pointerLabel(kind), durationOf(params));
+  if (kind !== 'hover') await cursorRipple(tabId);
+  const delivered = await pointerAt(tabId, at.x, at.y, entry.frameId, at.localX, at.localY, kind, requiresTrustedInput(params));
+  return {
+    ...(delivered.warning ? { warning: delivered.warning } : {}),
+    ref,
+    via: delivered.via,
+    x: at.x,
+    y: at.y,
+    devicePixelRatio: at.devicePixelRatio,
+  };
+}
+
+async function pointerXY(params: Record<string, unknown>, kind: PointerKind): Promise<unknown> {
+  const x = Number(params.x);
+  const y = Number(params.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error('x and y are required');
+  const tab = await controllableTab();
+  const tabId = tab.id as number;
+  await focusTab(tab);
+  await ensureReady(tabId);
+  await attachSettled(tabId);
+  await cursorMove(tabId, x, y, pointerLabel(kind), durationOf(params));
+  if (kind !== 'hover') await cursorRipple(tabId);
+  const delivered = await pointerAt(tabId, x, y, 0, x, y, kind, requiresTrustedInput(params));
+  return { ...(delivered.warning ? { warning: delivered.warning } : {}), x, y, via: delivered.via };
+}
+
+async function pointerAt(
+  tabId: number,
+  x: number,
+  y: number,
+  frameId: number,
+  localX: number,
+  localY: number,
+  kind: PointerKind,
+  requireTrusted: boolean,
+): Promise<{ via: 'trusted' | 'synthetic'; warning?: string }> {
   try {
-    await ask(tabId, frameId, 'arm-click', { x: localX, y: localY }, 1500).catch(() => undefined);
-    await mouseClick(tabId, x, y);
+    if (kind !== 'hover') {
+      await ask(tabId, frameId, 'arm-click', { x: localX, y: localY }, 1500).catch(() => undefined);
+    }
+    await sendPointer(tabId, x, y, kind);
     lastAttachProblem = '';
     return { via: 'trusted' };
   } catch (error) {
@@ -949,13 +1281,17 @@ async function clickAt(
     const reason = inputReason(error);
     if (requireTrusted) throw trustedInputRequiredError(reason);
     await restoreAttached(tabId);
-    await ask(tabId, frameId, 'synthetic-click', {
-      x: localX,
-      y: localY,
-      pointerType: touchEmulated ? 'touch' : 'mouse',
-    });
+    const pointerType = kind === 'click' || kind === 'double' ? (touchEmulated ? 'touch' : 'mouse') : 'mouse';
+    await ask(tabId, frameId, syntheticPointerMessage(kind), { x: localX, y: localY, pointerType });
     return { via: 'synthetic', warning: syntheticInputWarning(reason) };
   }
+}
+
+function syntheticPointerMessage(kind: PointerKind): string {
+  if (kind === 'hover') return 'synthetic-hover';
+  if (kind === 'double') return 'synthetic-dblclick';
+  if (kind === 'right') return 'synthetic-right-click';
+  return 'synthetic-click';
 }
 
 async function clickXY(params: Record<string, unknown>): Promise<unknown> {
@@ -1218,35 +1554,10 @@ function reloadExtension(): { reloading: true } {
   return { reloading: true };
 }
 
-async function mouseClick(tabId: number, x: number, y: number): Promise<void> {
-  const px = Math.round(x * 100) / 100;
-  const py = Math.round(y * 100) / 100;
-  await sendCommand(tabId, 'Input.dispatchMouseEvent', {
-    type: 'mouseMoved',
-    x: px,
-    y: py,
-    button: 'none',
-    pointerType: 'mouse',
-  });
-  await sendCommand(tabId, 'Input.dispatchMouseEvent', {
-    type: 'mousePressed',
-    x: px,
-    y: py,
-    button: 'left',
-    buttons: 1,
-    clickCount: 1,
-    pointerType: 'mouse',
-  });
-  await sleep(30);
-  await sendCommand(tabId, 'Input.dispatchMouseEvent', {
-    type: 'mouseReleased',
-    x: px,
-    y: py,
-    button: 'left',
-    buttons: 0,
-    clickCount: 1,
-    pointerType: 'mouse',
-  });
+async function sendPointer(tabId: number, x: number, y: number, kind: PointerKind): Promise<void> {
+  await dispatchPointer(x, y, kind, async (event) => {
+    await sendCommand(tabId, 'Input.dispatchMouseEvent', event as unknown as Record<string, unknown>);
+  }, sleep);
 }
 
 async function mouseWheel(tabId: number, x: number, y: number, deltaX: number, deltaY: number): Promise<void> {

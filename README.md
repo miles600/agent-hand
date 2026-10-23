@@ -139,8 +139,17 @@ agent-hand navigate <url>
 agent-hand snapshot
 agent-hand click <ref>
 agent-hand click-xy <x> <y>
+agent-hand hover <ref>
+agent-hand hover-xy <x> <y>
+agent-hand dblclick <ref>
+agent-hand dblclick-xy <x> <y>
+agent-hand right-click <ref>
+agent-hand right-click-xy <x> <y>
 agent-hand locate <text>
 agent-hand type <ref> <text> [--submit]
+agent-hand clear <ref>
+agent-hand fill <ref> <text> [--submit]
+agent-hand select <ref> <value-or-label>
 agent-hand press <key>
 agent-hand scroll <up|down|left|right|ref> [amount]
 agent-hand emulate <iphone|pixel|off|390x844|390x844@3|width height [dpr]> [--fit-window]
@@ -151,15 +160,28 @@ agent-hand console [--clear] [--max <n>]
 agent-hand network-errors [--clear] [--max <n>]
 agent-hand reload-extension
 agent-hand wait <ms>
+agent-hand wait-for text <substring> [--timeout <ms>]
+agent-hand wait-for url <substring|/pattern/> [--timeout <ms>]
+agent-hand wait-for idle [--timeout <ms>]
 ```
 
-`press` accepts `Enter`, `Tab`, `Escape`, arrows, `Backspace`, `Space`, a single character, and chords such as `Ctrl+A` or `Shift+Tab`. `type` appends; it does not clear the field. `scroll 12` scrolls that ref into view. `scroll down 800` turns the mouse wheel.
+`dblclick` is also `double-click`. `right-click` is also `context-click`. The xy forms accept `double-click-xy` and `context-click-xy` too.
+
+`press` accepts `Enter`, `Tab`, `Escape`, arrows, `Backspace`, `Space`, a single character, and chords such as `Ctrl+A` or `Shift+Tab`. `type` appends; it does not clear the field. `fill` clears the field, then inserts. `clear` empties an input, textarea, or contenteditable. `scroll 12` scrolls that ref into view. `scroll down 800` turns the mouse wheel.
 
 `click-xy` is CSS pixels in the viewport, the same space as the boxes in `snapshot`. `locate` returns center points for visible text so you can click a label that is not a normal button.
 
+`hover` moves the cursor and sends `Input.dispatchMouseEvent` `mouseMoved`. It does not click. `dblclick` sends a left press and release with `clickCount` 1, then again with `clickCount` 2. `right-click` uses the right button. A trusted right-click can open the browser context menu unless the page cancels `contextmenu`. Hover and right-click stay mouse events even when touch emulation is on. If DevTools holds the debugger, these fall back to DOM events the same way `click` does (`via: "synthetic"`, plus `warning`). `--require-trusted` fails instead.
+
+`clear` and `fill` focus the field with a click. On the trusted path they select the contents and press Backspace; `fill` then uses `Input.insertText`. On the synthetic path they set the value with the native setter and dispatch `input` and `change`, which updates Vue and React controlled inputs. A contenteditable gets `innerText` plus the same events. `type` is unchanged and still appends. Input types that reject `setSelectionRange` (for example `number`) use the synthetic setter unless `--require-trusted` is set.
+
+`select` picks a native `<select>` option by exact value, exact label, or one unique substring. That write is done in the page, so the result is `via: "synthetic"` and `--require-trusted` fails it: the operating-system popup is not a click. For a snapshot combobox, listbox, or option, it clicks a visible `role="option"` or `role="menuitem"` (exact text or `data-value` / `value`, otherwise one unique substring). A ref the snapshot already calls an option is clicked the same way when the label or value matches. A closed combobox is clicked once to open, then the option is clicked. Ambiguous matches fail. Options have to be in the same document as the ref. Closed shadow DOM, canvas widgets, and menus that never expose those roles are not supported.
+
+`wait-for text` polls `innerText`, including same-process iframes, until it contains the substring. `wait-for url` polls `location.href`. A plain string is a substring. A value wrapped in slashes (`/ready/i`) is a regular expression. `wait-for idle` means no Chrome Network request tracked since the debugger attached has been in flight for 500ms. Tracking is the same Network domain as `network-errors`, plus `loadingFinished` and `requestServedFromCache`. It starts when the debugger attaches, so requests that finished earlier are not counted, and a WebSocket or long poll may never go idle. If the debugger cannot attach, idle instead waits until `document.readyState` is `complete` and resource timing is unchanged for 500ms, and the result includes a warning. The default timeout is 10000ms and the maximum is 60000 (`--timeout`, or MCP `timeout`). A timeout throws.
+
 Commands print JSON on stdout. Errors go to stderr. A click or type result includes `via`: `trusted` when the debugger delivered the event, or `synthetic` when the page received DOM events instead. A synthetic result also has `warning`, and the CLI prints that warning on stderr. `status` includes the last viewport reported by `snapshot`, `emulate`, or `screenshot` (`cssWidth`, `cssHeight`, `devicePixelRatio`), so you can check it without parsing the page.
 
-`--require-trusted` makes `click`, `click-xy`, `type`, `press`, and `scroll` fail instead of falling back to synthetic input. The same switch is `AGENT_HAND_REQUIRE_TRUSTED=1` or `"requireTrusted": true` in `config.json`. The default stays the synthetic fallback. MCP accepts `requireTrusted: true` on those tools, and a bridge or `agent-hand mcp` started with the flag applies it to every call.
+`--require-trusted` makes `click`, `hover`, `dblclick`, `right-click`, their xy forms, `type`, `clear`, `fill`, `press`, `scroll`, and `select` fail instead of falling back to synthetic input. A native `<select>` is changed in the page, so it fails under this flag. The same switch is `AGENT_HAND_REQUIRE_TRUSTED=1` or `"requireTrusted": true` in `config.json`. The default stays the synthetic fallback. MCP accepts `requireTrusted: true` on those tools, and a bridge or `agent-hand mcp` started with the flag applies it to every call.
 
 While a direct DevTools session is attached, these commands drive that app. `detach` closes only the debugger socket and later commands go back to the Chrome extension. `reload-extension` always talks to the extension.
 
@@ -237,7 +259,7 @@ command = "node"
 args = ["/absolute/path/to/agent-hand/dist/bridge/index.js", "mcp"]
 ```
 
-Pi and other shell agents can skip MCP and run the CLI. The tools are `list_tabs`, `select_tab`, `navigate`, `snapshot`, `click`, `click_xy`, `locate`, `type`, `press`, `scroll`, `emulate`, `screenshot`, `get_text`, `console`, `network_errors`, `attach_cdp`, `detach_cdp`, `reload_extension`, and `wait`.
+Pi and other shell agents can skip MCP and run the CLI. The tools are `list_tabs`, `select_tab`, `navigate`, `snapshot`, `click`, `hover`, `dblclick`, `right_click`, and the `_xy` forms of those, `locate`, `type`, `clear`, `fill`, `select`, `press`, `scroll`, `emulate`, `screenshot`, `get_text`, `console`, `network_errors`, `attach_cdp`, `detach_cdp`, `reload_extension`, `wait`, `wait_for_text`, `wait_for_url`, and `wait_for_idle`.
 
 ## How a click works
 

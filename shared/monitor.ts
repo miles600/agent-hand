@@ -12,6 +12,45 @@ export type NetworkError = {
   time: number;
 };
 
+export type Inflight = {
+  ids: Set<string>;
+  /** Timestamp of the last transition to zero in-flight requests. 0 while any request is open. */
+  quietAt: number;
+};
+
+export function createInflight(now = Date.now()): Inflight {
+  return { ids: new Set(), quietAt: now };
+}
+
+/**
+ * Pair Network.requestWillBeSent with loadingFinished, loadingFailed, or
+ * requestServedFromCache. responseReceived is not the end of a request.
+ */
+export function trackInflight(state: Inflight, method: string, params: unknown, now = Date.now()): void {
+  if (
+    method !== 'Network.requestWillBeSent'
+    && method !== 'Network.loadingFinished'
+    && method !== 'Network.loadingFailed'
+    && method !== 'Network.requestServedFromCache'
+  ) {
+    return;
+  }
+  const record = params && typeof params === 'object' ? params as Record<string, unknown> : {};
+  const id = typeof record.requestId === 'string' ? record.requestId : '';
+  if (!id) return;
+  if (method === 'Network.requestWillBeSent') {
+    state.ids.add(id);
+    state.quietAt = 0;
+    return;
+  }
+  state.ids.delete(id);
+  if (state.ids.size === 0) state.quietAt = now;
+}
+
+export function inflightQuiet(state: Inflight, quietMs: number, now = Date.now()): boolean {
+  return state.ids.size === 0 && state.quietAt > 0 && now - state.quietAt >= quietMs;
+}
+
 export function pushCapped<T>(list: T[], item: T, cap = 200): void {
   list.push(item);
   if (list.length > cap) list.splice(0, list.length - cap);

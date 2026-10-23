@@ -31,7 +31,7 @@ export type BridgeOptions = {
   demoDir?: string;
   screenshotDir?: string;
   authTimeoutMs?: number;
-  /** When true, click/type/press/scroll/click_xy fail instead of synthetic input. */
+  /** When true, pointer, typing, and select commands fail instead of synthetic input. */
   requireTrusted?: boolean;
 };
 
@@ -314,13 +314,25 @@ const DIRECT_METHODS = new Set([
   'navigate',
   'snapshot',
   'click',
+  'hover',
+  'dblclick',
+  'right_click',
   'type',
+  'clear',
+  'fill',
+  'select',
   'press',
   'scroll',
   'screenshot',
   'get_text',
   'click_xy',
+  'hover_xy',
+  'dblclick_xy',
+  'right_click_xy',
   'locate',
+  'wait_for_text',
+  'wait_for_url',
+  'wait_for_idle',
   'emulate',
   'console',
   'network_errors',
@@ -328,6 +340,9 @@ const DIRECT_METHODS = new Set([
 
 function defaultTimeout(method: string, params: Record<string, unknown>): number {
   if (method === 'wait') return Number(params.ms) + 2000;
+  if (method === 'wait_for_text' || method === 'wait_for_url' || method === 'wait_for_idle') {
+    return Number(params.timeout ?? 10000) + 5000;
+  }
   if (method === 'navigate') return 35000;
   return 25000;
 }

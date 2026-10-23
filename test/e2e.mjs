@@ -64,7 +64,6 @@ try {
   const snap = await server.call('navigate', { url: demoUrl }).then(() => server.call('snapshot'));
   const tick = mustRef(snap, 'Count trusted clicks');
   const name = mustRef(snap, 'Your name');
-  const iframe = mustRef(snap, 'Iframe button');
   assert(snap.devicePixelRatio > 0, 'snapshot reports devicePixelRatio');
   assert(snap.text.includes('viewport'), snap.text);
 
@@ -83,7 +82,49 @@ try {
   const afterType = await server.call('get_text', { max: 8000 });
   assert(afterType.text.includes('Hello, Ada Lovelace (trusted submit)'), afterType.text);
 
-  await server.call('click', { ref: iframe, duration: 400 });
+  const hoverRef = mustRef(snap, 'Hover target');
+  const dblRef = mustRef(snap, 'Double click');
+  const menuRef = mustRef(snap, 'Right click');
+
+  const hovered = await server.call('hover', { ref: hoverRef, duration: 0 });
+  assert(hovered.via === 'trusted', JSON.stringify(hovered));
+  const doubled = await server.call('dblclick', { ref: dblRef, duration: 0 });
+  assert(doubled.via === 'trusted', JSON.stringify(doubled));
+  const menu = await server.call('right_click', { ref: menuRef, duration: 0 });
+  assert(menu.via === 'trusted', JSON.stringify(menu));
+  const filled = await server.call('fill', { ref: await refFor(server, 'City'), text: 'Paris', duration: 0 });
+  assert(filled.via === 'trusted', JSON.stringify(filled));
+  await server.call('clear', { ref: await refFor(server, 'City'), duration: 0 });
+  const noted = await server.call('fill', { ref: await refFor(server, 'Note'), text: 'Fresh note', duration: 0 });
+  assert(noted.via === 'trusted', JSON.stringify(noted));
+  const selected = await server.call('select', { ref: await refFor(server, 'Color'), value: 'Green', duration: 0 });
+  assert(selected.kind === 'native', JSON.stringify(selected));
+  assert(selected.via === 'synthetic', JSON.stringify(selected));
+  const pet = await server.call('select', { ref: await refFor(server, 'Pet'), value: 'Dog', duration: 0 });
+  assert(pet.kind === 'click', JSON.stringify(pet));
+  assert(pet.via === 'trusted', JSON.stringify(pet));
+  await server.call('click', { ref: await refFor(server, 'Show later'), duration: 0 });
+  const ready = await server.call('wait_for_text', { text: 'Status: ready', timeout: 3000 });
+  assert(ready.found === true, JSON.stringify(ready));
+  await server.call('click', { ref: await refFor(server, 'Mark url'), duration: 0 });
+  const hashed = await server.call('wait_for_url', { url: '#ready', timeout: 3000 });
+  assert(String(hashed.url).includes('#ready'), JSON.stringify(hashed));
+  const idle = await server.call('wait_for_idle', { timeout: 3000 });
+  assert(idle.idle === true, JSON.stringify(idle));
+
+  const afterActions = await server.call('get_text', { max: 8000 });
+  assert(afterActions.text.includes('Hover: trusted'), afterActions.text);
+  assert(afterActions.text.includes('Double: trusted'), afterActions.text);
+  assert(afterActions.text.includes('Context: trusted'), afterActions.text);
+  assert(/(^|\n)City:[ \t]*(\n|$)/.test(afterActions.text), afterActions.text);
+  assert(!afterActions.text.includes('City: Old city'), afterActions.text);
+  assert(!afterActions.text.includes('City: Paris'), afterActions.text);
+  assert(afterActions.text.includes('Note: Fresh note'), afterActions.text);
+  assert(afterActions.text.includes('Color: green'), afterActions.text);
+  assert(afterActions.text.includes('Pet: Dog'), afterActions.text);
+  assert(afterActions.text.includes('Status: ready'), afterActions.text);
+
+  await server.call('click', { ref: await refFor(server, 'Iframe button'), duration: 400 });
   const afterFrame = await server.call('get_text', { max: 8000 });
   assert(afterFrame.text.includes('Iframe trusted clicks: 1'), afterFrame.text);
 
@@ -165,6 +206,17 @@ try {
   await rm(devConfig, { force: true });
   if (server) await server.close();
   await rm(home, { recursive: true, force: true });
+}
+
+async function refFor(server, name) {
+  let shot = await server.call('snapshot');
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const item = shot.items.find((entry) => entry.name === name);
+    if (item) return item.ref;
+    await server.call('scroll', { direction: 'down', amount: 400 });
+    shot = await server.call('snapshot');
+  }
+  throw new Error(`missing ref ${name}\n${shot.text}`);
 }
 
 function mustRef(snapshot, name) {

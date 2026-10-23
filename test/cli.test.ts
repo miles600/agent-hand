@@ -89,6 +89,56 @@ test('parses the commands from the demo script', () => {
   assert.equal(resolveCli(['press', 'Ctrl+A']).kind, 'call');
   assert.throws(() => resolveCli(['navigate', 'file:///tmp/x']), /http/);
   assert.throws(() => resolveCli(['attach', 'http://example.com:9222']), /loopback/);
+  assert.deepEqual(resolveCli(['double-click', '4']), {
+    kind: 'call',
+    method: 'dblclick',
+    params: { ref: 4 },
+    port: undefined,
+    cdp: undefined,
+  });
+  assert.deepEqual(resolveCli(['context-click-xy', '8', '9']), {
+    kind: 'call',
+    method: 'right_click_xy',
+    params: { x: 8, y: 9 },
+    port: undefined,
+    cdp: undefined,
+  });
+  assert.deepEqual(resolveCli(['fill', '2', 'Ada', 'Lovelace']), {
+    kind: 'call',
+    method: 'fill',
+    params: { ref: 2, text: 'Ada Lovelace', submit: false },
+    port: undefined,
+    cdp: undefined,
+  });
+  assert.deepEqual(resolveCli(['select', '6', 'Green', 'tea']), {
+    kind: 'call',
+    method: 'select',
+    params: { ref: 6, value: 'Green tea' },
+    port: undefined,
+    cdp: undefined,
+  });
+  assert.deepEqual(resolveCli(['wait-for', 'text', 'Status', 'ready', '--timeout', '1500']), {
+    kind: 'call',
+    method: 'wait_for_text',
+    params: { text: 'Status ready', timeout: 1500 },
+    port: undefined,
+    cdp: undefined,
+  });
+  assert.deepEqual(resolveCli(['wait-for', 'idle', '--timeout', '2000']), {
+    kind: 'call',
+    method: 'wait_for_idle',
+    params: { timeout: 2000 },
+    port: undefined,
+    cdp: undefined,
+  });
+  assert.deepEqual(resolveCli(['--require-trusted', 'hover', '3']), {
+    kind: 'call',
+    method: 'hover',
+    params: { ref: 3, requireTrusted: true },
+    port: undefined,
+    cdp: undefined,
+    requireTrusted: true,
+  });
 });
 
 test('help mentions exact viewport sizes and require-trusted', () => {
@@ -97,4 +147,6 @@ test('help mentions exact viewport sizes and require-trusted', () => {
   assert.match(result.stdout, /390x844/);
   assert.match(result.stdout, /require-trusted/);
   assert.match(result.stdout, /fit-window/);
+  assert.match(result.stdout, /wait-for text/);
+  assert.match(result.stdout, /fill <ref>/);
 });

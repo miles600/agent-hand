@@ -37,6 +37,8 @@ test('bridge auth, queue, screenshot file, and demo page', async () => {
     const html = await demo.text();
     assert.match(html, /isTrusted/);
     assert.match(html, /Count trusted clicks/);
+    assert.match(html, /Hover target/);
+    assert.match(html, /role="combobox"/);
 
     await assert.rejects(() => BridgeClient.connect(server.port, 'not-the-token', 1000), /bad token/);
     await rejectedOrigin(server.port);

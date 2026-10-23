@@ -64,6 +64,99 @@ export const TOOLS: Tool[] = [
     },
   },
   {
+    name: 'hover',
+    description:
+      'Move the agent cursor to a snapshot ref and send a trusted mouse move, without clicking. Same synthetic fallback and requireTrusted behavior as click. DevTools must be closed for a trusted hover.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ref: { type: 'integer', description: 'Ref from the latest snapshot.' },
+        requireTrusted: { type: 'boolean', description: 'Fail if the hover cannot be trusted. DevTools must be closed.' },
+        duration: { type: 'integer', description: 'Cursor glide in milliseconds. Default 700.' },
+      },
+      required: ['ref'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'hover_xy',
+    description:
+      'Glide the cursor to a viewport point (CSS px, the same space as snapshot boxes) and hover. No click. Same synthetic fallback and requireTrusted behavior as click.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        x: { type: 'number' },
+        y: { type: 'number' },
+        duration: { type: 'integer' },
+        requireTrusted: { type: 'boolean', description: 'Fail if the hover cannot be trusted. DevTools must be closed.' },
+      },
+      required: ['x', 'y'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'dblclick',
+    description:
+      'Double-click a snapshot ref. The trusted path sends a left press and release with clickCount 1, then again with clickCount 2. Same synthetic fallback and requireTrusted behavior as click.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ref: { type: 'integer', description: 'Ref from the latest snapshot.' },
+        requireTrusted: { type: 'boolean', description: 'Fail if the double-click cannot be trusted. DevTools must be closed.' },
+        duration: { type: 'integer' },
+      },
+      required: ['ref'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'dblclick_xy',
+    description:
+      'Double-click a viewport point in CSS px. Same trusted sequence and synthetic fallback as dblclick.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        x: { type: 'number' },
+        y: { type: 'number' },
+        duration: { type: 'integer' },
+        requireTrusted: { type: 'boolean' },
+      },
+      required: ['x', 'y'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'right_click',
+    description:
+      'Right-click a snapshot ref so the page receives a contextmenu event. A trusted click can open the browser context menu unless the page cancels it. Same synthetic fallback and requireTrusted behavior as click.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ref: { type: 'integer', description: 'Ref from the latest snapshot.' },
+        requireTrusted: { type: 'boolean', description: 'Fail if the right-click cannot be trusted. DevTools must be closed.' },
+        duration: { type: 'integer' },
+      },
+      required: ['ref'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'right_click_xy',
+    description:
+      'Right-click a viewport point in CSS px. Same trusted sequence and synthetic fallback as right_click. Touch emulation still uses the mouse button, because a touch has no right click.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        x: { type: 'number' },
+        y: { type: 'number' },
+        duration: { type: 'integer' },
+        requireTrusted: { type: 'boolean' },
+      },
+      required: ['x', 'y'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'type',
     description:
       'Click a ref with the agent cursor, then insert text with Input.insertText. Pass submit:true to press Enter afterwards. Text is appended; the tool does not clear the field.',
@@ -76,6 +169,54 @@ export const TOOLS: Tool[] = [
         requireTrusted: { type: 'boolean', description: 'Fail if the click or typing cannot be trusted. DevTools must be closed.' },
       },
       required: ['ref', 'text'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'clear',
+    description:
+      'Clear an input, textarea, or contenteditable ref. The trusted path focuses it, selects the contents, and presses Backspace. The synthetic path sets an empty value with the native setter plus input and change events, including contenteditable. type still appends.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ref: { type: 'integer' },
+        requireTrusted: { type: 'boolean', description: 'Fail if the clear cannot be trusted. DevTools must be closed.' },
+        duration: { type: 'integer' },
+      },
+      required: ['ref'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'fill',
+    description:
+      'Replace the contents of an input, textarea, or contenteditable ref: clear, then insert text. Unlike type, which appends. Trusted when the debugger accepts input. The synthetic path uses the native value setter plus input and change so Vue and React controlled inputs update. Pass submit:true to press Enter afterwards.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ref: { type: 'integer' },
+        text: { type: 'string' },
+        submit: { type: 'boolean' },
+        requireTrusted: { type: 'boolean', description: 'Fail if the fill cannot be trusted. DevTools must be closed.' },
+        duration: { type: 'integer' },
+      },
+      required: ['ref', 'text'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'select',
+    description:
+      'Choose an option by value or visible label. A native select is set in the page (input and change); that change is synthetic because the OS popup is not a click, and requireTrusted fails it. A combobox, listbox, or option ref is clicked when a visible role=option or role=menuitem matches. Widgets without those roles, closed shadow DOM, and portals in another frame are not supported.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ref: { type: 'integer', description: 'Ref of a select, combobox, listbox, or option from the latest snapshot.' },
+        value: { type: 'string', description: 'Option value or visible label. Exact match wins; otherwise one unique substring.' },
+        requireTrusted: { type: 'boolean', description: 'Fail a native select. A custom option still uses the click trusted/synthetic rules.' },
+        duration: { type: 'integer' },
+      },
+      required: ['ref', 'value'],
       additionalProperties: false,
     },
   },
@@ -139,6 +280,46 @@ export const TOOLS: Tool[] = [
         ms: { type: 'integer' },
       },
       required: ['ms'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'wait_for_text',
+    description:
+      'Poll until visible page text (innerText, including same-process iframes) contains the substring. Default timeout is 10000ms, maximum 60000. Fails with an error on timeout. Matching is case-sensitive.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: 'Substring of the visible page text.' },
+        timeout: { type: 'integer', description: 'Milliseconds. Default 10000. Maximum 60000.' },
+      },
+      required: ['text'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'wait_for_url',
+    description:
+      'Poll until the current URL contains the string, or matches a /pattern/flags regular expression. Default timeout is 10000ms, maximum 60000. Fails with an error on timeout.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'Substring of location.href, or a /pattern/flags regular expression.' },
+        timeout: { type: 'integer', description: 'Milliseconds. Default 10000. Maximum 60000.' },
+      },
+      required: ['url'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'wait_for_idle',
+    description:
+      'Best-effort network idle. When the debugger is attached, return after no Chrome Network request has been in flight for 500ms. Tracking uses the same Network events as network_errors, plus loadingFinished, and starts at attach. If the debugger is unavailable, wait until document.readyState is complete and resource timing is stable for 500ms, and the result includes a warning. Default timeout is 10000ms. WebSockets and long polls may never go idle.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        timeout: { type: 'integer', description: 'Milliseconds. Default 10000. Maximum 60000.' },
+      },
       additionalProperties: false,
     },
   },

@@ -16,6 +16,11 @@ type FrameRect = { src: string; x: number; y: number; width: number; height: num
 type LocateHit = { text: string; tag: string; x: number; y: number; width: number; height: number };
 type ConsoleLine = { level: string; text: string; time: number; source: 'page' };
 type KeySpec = { key?: string; code?: string; keyCode?: number; text?: string; modifiers?: number };
+type SelectPlan =
+  | { action: 'native'; value: string; label: string }
+  | { action: 'click'; x: number; y: number; label: string }
+  | { action: 'open' }
+  | { action: 'error'; error: string };
 
 export type PageApi = {
   collect: () => { elements: PageElement[] };
@@ -30,10 +35,16 @@ export type PageApi = {
   text: () => string;
   pageInfo: () => { href: string; title: string };
   syntheticClick: (x: number, y: number, pointerType?: string) => { tag: string; text: string } | null;
+  syntheticHover: (x: number, y: number) => { tag: string; text: string } | null;
+  syntheticDblclick: (x: number, y: number, pointerType?: string) => { tag: string; text: string } | null;
+  syntheticRightClick: (x: number, y: number) => { tag: string; text: string } | null;
   /** Drop pointer-events on a disabled picker field so a trusted click hits its wrapper. */
   armClick: (x: number, y: number) => void;
   locate: (text: string) => LocateHit[];
   setValue: (ahId: string, value: string) => boolean;
+  selectContents: (ahId: string) => boolean;
+  selectOption: (ahId: string, query: string, opened?: boolean, apply?: boolean) => SelectPlan;
+  resourceTiming: () => { readyState: string; resources: number };
   syntheticKey: (spec: KeySpec, force?: boolean) => { acted: boolean };
   syntheticScroll: (x: number, y: number, deltaX: number, deltaY: number) => boolean;
   cursorMove: (x: number, y: number, label: string, duration: number) => Promise<void>;
@@ -59,6 +70,8 @@ const SELECTOR = [
   '[role="checkbox"]',
   '[role="radio"]',
   '[role="combobox"]',
+  '[role="listbox"]',
+  '[role="option"]',
   '[role="tab"]',
   '[role="menuitem"]',
   '[role="switch"]',
@@ -120,9 +133,15 @@ export function installPageApi(): PageApi {
     text,
     pageInfo,
     syntheticClick,
+    syntheticHover,
+    syntheticDblclick,
+    syntheticRightClick,
     armClick,
     locate,
     setValue,
+    selectContents,
+    selectOption,
+    resourceTiming,
     syntheticKey,
     syntheticScroll,
     cursorMove,
@@ -327,6 +346,62 @@ function syntheticClick(x: number, y: number, pointerType = 'mouse'): { tag: str
   return { tag: target.tagName.toLowerCase(), text: clean(label).slice(0, 40) };
 }
 
+function syntheticHover(x: number, y: number): { tag: string; text: string } | null {
+  const target = hitTarget(x, y);
+  if (!(target instanceof HTMLElement) && !(target instanceof SVGElement)) return null;
+  const init = pointInit(x, y, 0);
+  target.dispatchEvent(new PointerEvent('pointerover', { ...init, pointerType: 'mouse', isPrimary: true }));
+  target.dispatchEvent(new MouseEvent('mouseover', init));
+  target.dispatchEvent(new PointerEvent('pointerenter', { ...init, pointerType: 'mouse', isPrimary: true, bubbles: false }));
+  target.dispatchEvent(new MouseEvent('mouseenter', { ...init, bubbles: false }));
+  target.dispatchEvent(new PointerEvent('pointermove', { ...init, pointerType: 'mouse', isPrimary: true }));
+  target.dispatchEvent(new MouseEvent('mousemove', init));
+  return described(target);
+}
+
+function syntheticDblclick(x: number, y: number, pointerType = 'mouse'): { tag: string; text: string } | null {
+  const first = syntheticClick(x, y, pointerType);
+  if (!first) return null;
+  const target = hitTarget(x, y);
+  if (!(target instanceof HTMLElement) && !(target instanceof SVGElement)) return first;
+  const init = pointInit(x, y, 0);
+  if (pointerType === 'touch') {
+    target.dispatchEvent(new PointerEvent('pointerdown', { ...init, pointerId: 1, pointerType: 'touch', isPrimary: true }));
+    dispatchTouch(target, 'touchstart', x, y);
+    target.dispatchEvent(new PointerEvent('pointerup', { ...init, pointerId: 1, pointerType: 'touch', isPrimary: true }));
+    dispatchTouch(target, 'touchend', x, y);
+  } else {
+    target.dispatchEvent(new PointerEvent('pointerdown', { ...init, pointerType: 'mouse', isPrimary: true }));
+    target.dispatchEvent(new MouseEvent('mousedown', { ...init, buttons: 1 }));
+    target.dispatchEvent(new PointerEvent('pointerup', { ...init, pointerType: 'mouse', isPrimary: true }));
+    target.dispatchEvent(new MouseEvent('mouseup', init));
+  }
+  target.dispatchEvent(new MouseEvent('click', { ...init, detail: 2 }));
+  target.dispatchEvent(new MouseEvent('dblclick', { ...init, detail: 2 }));
+  return described(target);
+}
+
+function syntheticRightClick(x: number, y: number): { tag: string; text: string } | null {
+  const target = hitTarget(x, y);
+  if (!(target instanceof HTMLElement) && !(target instanceof SVGElement)) return null;
+  const init = pointInit(x, y, 2);
+  target.dispatchEvent(new PointerEvent('pointerdown', { ...init, pointerType: 'mouse', isPrimary: true, button: 2, buttons: 2 }));
+  target.dispatchEvent(new MouseEvent('mousedown', { ...init, button: 2, buttons: 2 }));
+  target.dispatchEvent(new PointerEvent('pointerup', { ...init, pointerType: 'mouse', isPrimary: true, button: 2, buttons: 0 }));
+  target.dispatchEvent(new MouseEvent('mouseup', { ...init, button: 2, buttons: 0 }));
+  target.dispatchEvent(new MouseEvent('contextmenu', { ...init, button: 2, buttons: 0 }));
+  return described(target);
+}
+
+function pointInit(x: number, y: number, button: number): MouseEventInit {
+  return { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y, view: window, button };
+}
+
+function described(target: Element): { tag: string; text: string } {
+  const label = target instanceof HTMLElement ? target.innerText : target.textContent || '';
+  return { tag: target.tagName.toLowerCase(), text: clean(label).slice(0, 40) };
+}
+
 function locate(query: string): LocateHit[] {
   const wanted = query.trim();
   if (!wanted) return [];
@@ -357,7 +432,21 @@ function locate(query: string): LocateHit[] {
 
 function setValue(ahId: string, value: string): boolean {
   const el = byId.get(ahId);
-  if (!(el instanceof HTMLInputElement) && !(el instanceof HTMLTextAreaElement)) return false;
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+    writeNativeValue(el, value);
+    return true;
+  }
+  if (el instanceof HTMLElement && el.isContentEditable) {
+    el.focus();
+    el.innerText = value;
+    el.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  }
+  return false;
+}
+
+function writeNativeValue(el: HTMLInputElement | HTMLTextAreaElement, value: string): void {
   el.focus();
   const proto = el instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
   const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
@@ -365,7 +454,173 @@ function setValue(ahId: string, value: string): boolean {
   else el.value = value;
   el.dispatchEvent(new Event('input', { bubbles: true }));
   el.dispatchEvent(new Event('change', { bubbles: true }));
-  return true;
+}
+
+function selectContents(ahId: string): boolean {
+  const el = byId.get(ahId);
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+    el.focus();
+    try {
+      el.setSelectionRange(0, el.value.length);
+    } catch {
+      return false;
+    }
+    return true;
+  }
+  if (el instanceof HTMLElement && el.isContentEditable) {
+    el.focus();
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    return true;
+  }
+  return false;
+}
+
+function resourceTiming(): { readyState: string; resources: number } {
+  return {
+    readyState: document.readyState,
+    resources: performance.getEntriesByType('resource').length,
+  };
+}
+
+const OPTION_QUERY = '[role="option"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"]';
+
+function selectOption(ahId: string, query: string, opened = false, apply = true): SelectPlan {
+  const el = byId.get(ahId);
+  if (!el || !el.isConnected) return { action: 'error', error: 'element is gone; take a new snapshot' };
+  const wanted = query.trim();
+  if (!wanted) return { action: 'error', error: 'value is required' };
+  if (el instanceof HTMLSelectElement) {
+    const chosen = matchNative(el, wanted);
+    if (!chosen) return { action: 'error', error: `no option matching ${JSON.stringify(wanted)}. A native select matches the option value or its visible label.` };
+    if ('error' in chosen) return { action: 'error', error: chosen.error };
+    if (apply) applyNative(el, chosen.option);
+    return { action: 'native', value: chosen.option.value, label: optionLabel(chosen.option) };
+  }
+  if (el instanceof HTMLElement && isOptionLike(el)) {
+    const own = pickElements([el], wanted);
+    if (own && 'el' in own) {
+      const point = centerOf(own.el);
+      if (!point) return { action: 'error', error: 'option is not visible' };
+      return { action: 'click', ...point, label: optionName(own.el) };
+    }
+  }
+  const scope = optionScope(el, opened);
+  const found = pickElements(visibleOptions(scope), wanted);
+  if (found && 'error' in found) return { action: 'error', error: found.error };
+  if (found && 'el' in found) {
+    const point = centerOf(found.el);
+    if (!point) return { action: 'error', error: 'option is not visible' };
+    return { action: 'click', ...point, label: optionName(found.el) };
+  }
+  if (!opened && canOpen(el)) return { action: 'open' };
+  return {
+    action: 'error',
+    error: `no option matching ${JSON.stringify(wanted)}. Custom dropdowns need a visible role=option or role=menuitem in this document. Closed shadow DOM and other frames are not searched.`,
+  };
+}
+
+function applyNative(select: HTMLSelectElement, option: HTMLOptionElement): void {
+  const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
+  if (setter) setter.call(select, option.value);
+  else select.value = option.value;
+  select.dispatchEvent(new Event('input', { bubbles: true }));
+  select.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function matchNative(select: HTMLSelectElement, query: string): { option: HTMLOptionElement } | { error: string } | null {
+  const options = [...select.options].filter((option) => !option.disabled);
+  const exactValue = options.filter((option) => option.value === query);
+  if (exactValue.length === 1) return { option: exactValue[0] };
+  if (exactValue.length > 1) return { error: `ambiguous option ${JSON.stringify(query)}` };
+  const exactLabel = options.filter((option) => optionLabel(option) === query);
+  if (exactLabel.length === 1) return { option: exactLabel[0] };
+  if (exactLabel.length > 1) return { error: `ambiguous option ${JSON.stringify(query)}` };
+  const partial = options.filter((option) => optionLabel(option).includes(query) || option.value.includes(query));
+  if (partial.length === 1) return { option: partial[0] };
+  if (partial.length > 1) return { error: `ambiguous option ${JSON.stringify(query)}` };
+  return null;
+}
+
+function optionLabel(option: HTMLOptionElement): string {
+  return clean(option.label || option.text);
+}
+
+function optionScope(el: Element, opened: boolean): ParentNode {
+  const controlled = controlledPopup(el);
+  if (controlled) return controlled;
+  const role = (el.getAttribute('role') || '').toLowerCase();
+  if (role === 'listbox' || role === 'menu') return el;
+  const owner = el.closest('[role="listbox"], [role="menu"]');
+  if (owner) return owner;
+  if (opened) return document;
+  return el;
+}
+
+function controlledPopup(el: Element): HTMLElement | null {
+  const ids = `${el.getAttribute('aria-controls') || ''} ${el.getAttribute('aria-owns') || ''}`.trim().split(/\s+/);
+  for (const id of ids) {
+    if (!id) continue;
+    const node = document.getElementById(id);
+    if (node instanceof HTMLElement) return node;
+  }
+  return null;
+}
+
+function canOpen(el: Element): boolean {
+  const role = (el.getAttribute('role') || '').toLowerCase();
+  if (role === 'combobox' || role === 'listbox' || role === 'menu') return true;
+  if (roleOf(el) === 'combobox') return true;
+  return el.hasAttribute('aria-controls') || el.hasAttribute('aria-owns') || el.hasAttribute('aria-haspopup');
+}
+
+function visibleOptions(scope: ParentNode): HTMLElement[] {
+  return [...scope.querySelectorAll(OPTION_QUERY)].filter((node): node is HTMLElement => {
+    return node instanceof HTMLElement && isOptionLike(node) && isVisible(node) && node.getAttribute('aria-disabled') !== 'true';
+  });
+}
+
+function isOptionLike(el: Element): boolean {
+  const role = (el.getAttribute('role') || '').toLowerCase();
+  if (role === 'option' || role === 'menuitem' || role === 'menuitemcheckbox' || role === 'menuitemradio') return true;
+  return roleOf(el) === 'option';
+}
+
+function pickElements(elements: HTMLElement[], query: string): { el: HTMLElement } | { error: string } | null {
+  const exact = elements.filter((el) => exactOption(el, query));
+  if (exact.length === 1) return { el: exact[0] };
+  if (exact.length > 1) return { error: `ambiguous option ${JSON.stringify(query)}` };
+  const partial = elements.filter((el) => partialOption(el, query));
+  if (partial.length === 1) return { el: partial[0] };
+  if (partial.length > 1) return { error: `ambiguous option ${JSON.stringify(query)}` };
+  return null;
+}
+
+function exactOption(el: HTMLElement, query: string): boolean {
+  return optionName(el) === query || optionValue(el) === query;
+}
+
+function partialOption(el: HTMLElement, query: string): boolean {
+  const name = optionName(el);
+  const value = optionValue(el);
+  return Boolean((name && name.includes(query)) || (value && value.includes(query)));
+}
+
+function optionName(el: HTMLElement): string {
+  return clean(accessibleName(el) || el.innerText || el.textContent || '');
+}
+
+function optionValue(el: HTMLElement): string {
+  return clean(el.getAttribute('data-value') || el.getAttribute('value') || '');
+}
+
+function centerOf(el: Element): { x: number; y: number } | null {
+  if (!isVisible(el)) return null;
+  const rect = el.getBoundingClientRect();
+  return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
 }
 
 function syntheticKey(spec: KeySpec, force = false): { acted: boolean } {
