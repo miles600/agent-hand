@@ -131,6 +131,7 @@ agent-hand serve [--port 17321] [--cdp http://127.0.0.1:9222]
 agent-hand mcp [--port 17321]
 agent-hand token
 agent-hand status
+agent-hand timeline
 agent-hand attach <http://127.0.0.1:port>
 agent-hand detach
 agent-hand list-tabs
@@ -270,6 +271,16 @@ Use `observe({tabId, includeScreenshot:true})` to select an existing tab and ret
 Load the small [Agent Hand Skill](skills/agent-hand/SKILL.md) to guide observation, action, verification, and recovery. For Codex, copy the `skills/agent-hand` folder into `~/.codex/skills/`. Other agents can use their Skill loader or project instructions. The MCP initialize response also carries the essential workflow.
 
 Run `npm run check:mcp` for protocol/tool discovery, or `npm run check:mcp -- --tab <test-tab-id>` to also verify native PNG delivery. Follow the [client compatibility guide](docs/client-compatibility.md) for a canvas-based visual test in Codex, Cursor, ZCode, TRAE, or WorkBuddy. The transport probe never claims that another client's model saw the image. Use `AGENT_HAND_MCP_IMAGES=0` only for clients that require text-only results.
+
+## Operation timeline and human takeover
+
+Run `node dist/bridge/index.js timeline`, or call the MCP `timeline` tool, to get a one-use local timeline link. Open it within 60 seconds to connect automatically. The dashboard is at `http://127.0.0.1:17321/timeline` (use your configured port); after a bridge restart, reopen it from the command or connect with your existing extension token.
+
+The timeline shows the target tab and URL, action and control name, status, duration, result or failure, and screenshots after browser actions. Dashboard inspection activity is filtered out of the displayed history, and the list stays stable while you interact with its entries. Automatic screenshot capture can be disabled in the dashboard. The latest 100 records and up to 64 MB of timeline screenshots are kept privately under `~/.agent-hand/timeline`; history survives restarts and can be cleared in the dashboard. Typed values and URL query values are masked in metadata. Screenshots retain the visible page content.
+
+**Stop and take over** cancels queued actions, interrupts bridge waits, and blocks new browser commands. An action already sent to Chrome may finish and cannot be undone: the dashboard shows that it is still finishing and disables resume until the bridge receives its result. Automatic evidence capture stops during takeover. **Return to Agent** allows new requests; cancelled actions are never replayed. The agent must observe the page again before continuing. Takeover remains in effect across bridge restarts, and interrupted history is marked with an unknown outcome.
+
+Queued requests also expire at their original deadline, so a client timeout does not leave a click waiting to run later. The timeline uses a separate authenticated control path, so stopping remains available while the browser command queue is busy.
 
 ## How a click works
 

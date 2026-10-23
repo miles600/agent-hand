@@ -163,6 +163,8 @@ async function runStatus(port: number): Promise<void> {
 
 function commandCall(command: string, args: string[]): { method: string; params: Record<string, unknown> } {
   switch (command) {
+    case 'timeline':
+      return { method: 'timeline', params: {} };
     case 'list-tabs':
       return { method: 'list_tabs', params: {} };
     case 'select-tab':
@@ -404,6 +406,7 @@ Usage:
   agent-hand status
   agent-hand attach <http://127.0.0.1:port>   direct CDP (Electron / Chromium)
   agent-hand detach                           close the CDP socket; the app stays open
+  agent-hand timeline                       local timeline + human takeover controls
   agent-hand list-tabs
   agent-hand select-tab <tabId>
   agent-hand new-tab <url>

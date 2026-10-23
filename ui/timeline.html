@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agent Hand · 操作时间线</title>
+<style>
+  :root{color-scheme:light;--ink:#19302d;--muted:#6a7773;--line:#dce4df;--green:#146b54;--paper:#fffefa;--red:#b34131}
+  *{box-sizing:border-box}body{margin:0;background:#f3f5ef;color:var(--ink);font:15px/1.6 system-ui,-apple-system,sans-serif}button,input{font:inherit}button{cursor:pointer;border:1px solid var(--line);border-radius:9px;background:white;color:var(--ink);padding:9px 15px}button:hover{border-color:#8eaaa0}button:disabled{opacity:.5;cursor:default}button:focus-visible,input:focus-visible,summary:focus-visible{outline:3px solid #8bc9b4;outline-offset:3px}[hidden]{display:none!important}
+  .shell{max-width:1180px;margin:auto;padding:30px 32px 70px}.top{display:flex;align-items:center;justify-content:space-between;gap:20px}.brand{display:flex;align-items:center;gap:12px}.mark{display:grid;place-items:center;background:var(--ink);color:#ffd99a;width:43px;height:43px;border-radius:12px;font-size:23px}.eyebrow{color:var(--muted);font-size:11px;letter-spacing:2px;font-weight:650}h1{font-size:24px;line-height:1.25;margin:3px 0}h2{font-size:18px;margin:0}.intro{color:var(--muted);margin:16px 0 23px}.actions{display:flex;gap:8px}.stop{background:var(--red);color:white;border-color:var(--red);font-weight:650}.resume{background:var(--green);color:white;border-color:var(--green);font-weight:650}
+  .status{display:grid;grid-template-columns:1.35fr 1fr 1fr;background:var(--paper);border:1px solid var(--line);border-radius:14px;overflow:hidden}.stat{padding:18px 22px}.stat+.stat{border-left:1px solid var(--line)}.stat small{display:block;color:var(--muted);margin-bottom:5px}.value{font-weight:650;font-size:18px}.dot{display:inline-block;width:8px;height:8px;background:var(--green);border-radius:50%;margin-right:9px}.dot.warn{background:#c48b25}.dot.off{background:#a5aba6}.banner{padding:13px 18px;border:1px solid #e9d6ac;background:#fff5df;border-radius:10px;margin:16px 0;color:#785019}.error{background:#fff0ed;color:#933d30;border-color:#e7c3b9}
+  .bar{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;margin:28px 0 17px}.filters{display:flex;gap:6px;flex-wrap:wrap}.filter{padding:6px 13px;background:transparent;border-color:transparent;border-radius:20px;color:var(--muted)}.filter.active{background:#e0eee6;color:#14533f}.settings{display:flex;gap:15px;align-items:center;font-size:13px;color:var(--muted)}.settings label{display:flex;align-items:center;gap:6px;cursor:pointer}.link{background:transparent;padding:4px 2px;border:0;color:var(--muted)}
+  .entry{position:relative;background:var(--paper);border:1px solid var(--line);border-radius:12px;margin:12px 0;padding:20px 22px}.row{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}.entry-title{font-size:16px;font-weight:650;word-break:break-word}.entry-time{color:var(--muted);font-size:12px;white-space:nowrap}.badge{display:inline-block;font-size:11px;border-radius:20px;padding:2px 8px;background:#edf0eb;color:#66716c;margin-left:9px;vertical-align:2px}.badge.succeeded{background:#e5f1e8;color:#236448}.badge.running,.badge.queued{background:#fff0d4;color:#8c601a}.badge.failed,.badge.expired,.badge.interrupted{background:#fae7e1;color:#9c4332}.target{color:var(--muted);font-size:13px;overflow-wrap:anywhere;margin:9px 0}.target strong{color:#4a6158;font-weight:500}.content{display:flex;gap:20px;margin-top:13px;align-items:flex-start}.summary{flex:1;min-width:0}.result{margin:0;font-size:13px}.failure{color:#a63e2d;overflow-wrap:anywhere}.capture-note{color:var(--muted);font-size:12px;margin:8px 0}.thumb{width:210px;padding:0;border-radius:8px;overflow:hidden;background:#eef0eb;flex-shrink:0}.thumb img{display:block;width:100%;height:118px;object-fit:cover;object-position:top}.thumb span{display:block;font-size:11px;padding:4px;color:var(--muted)}details{margin-top:12px;font-size:12px;color:var(--muted)}summary{cursor:pointer;width:max-content}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#eff2ec;border-radius:8px;padding:12px;max-height:260px;overflow:auto;color:#45574e;font:12px/1.6 ui-monospace,monospace}.empty{text-align:center;padding:72px 20px;border:1px dashed #cbd8ce;border-radius:14px;color:var(--muted);background:#fafbf7}.empty strong{display:block;color:#466053;font-size:18px;margin-bottom:8px}.foot{font-size:12px;color:var(--muted);margin-top:22px}
+  .login{max-width:480px;padding:25px;margin:35px 0;background:var(--paper);border:1px solid var(--line);border-radius:14px}.login p{color:var(--muted)}.login input{display:block;width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;margin:14px 0}.login button{background:var(--green);color:white}dialog{border:1px solid var(--line);border-radius:12px;padding:16px;max-width:95vw;max-height:93vh;background:var(--paper)}dialog::backdrop{background:#162923aa}dialog .row{align-items:center;margin-bottom:12px}dialog img{display:block;max-width:88vw;max-height:75vh;object-fit:contain}
+  @media(max-width:700px){.shell{padding:20px 16px 50px}.top{align-items:flex-start;flex-direction:column}.status{grid-template-columns:1fr}.stat+.stat{border-left:0;border-top:1px solid var(--line)}.stat{padding:12px 18px}.content{flex-direction:column}.thumb{width:100%}.thumb img{height:180px}.entry{padding:17px}.row{flex-wrap:wrap}.bar{margin-top:22px}}
+</style>
+</head>
+<body>
+<main class="shell">
+  <header class="top">
+    <div class="brand"><div class="mark" aria-hidden="true">↗</div><div><div class="eyebrow">AGENT HAND</div><h1>操作时间线</h1></div></div>
+    <div class="actions" id="controls" hidden><button class="stop" id="pause">■ 停止并接管</button><button class="resume" id="resume" hidden>交还 Agent</button></div>
+  </header>
+  <p class="intro">看清每一步在操作什么。需要时，随时停下来，由你接手。</p>
+  <div id="notice" class="banner" role="status" hidden></div>
+  <form id="login" class="login" hidden>
+    <h2>连接本机 Agent Hand</h2><p>从 Agent Hand 的 timeline 命令打开此页面可自动连接。也可以使用扩展中已配置的连接密钥。</p>
+    <label for="token">本机连接密钥</label><input id="token" type="password" autocomplete="off" required><button type="submit">连接</button>
+  </form>
+  <section id="dashboard" hidden>
+    <div class="status">
+      <div class="stat"><small>当前控制权</small><div class="value"><span id="mode-dot" class="dot"></span><span id="mode">正在连接</span></div></div>
+      <div class="stat"><small>浏览器连接</small><div class="value" id="connection">—</div></div>
+      <div class="stat"><small>本地记录</small><div class="value" id="count">0 步</div></div>
+    </div>
+    <div class="bar">
+      <nav class="filters" aria-label="筛选记录"><button class="filter active" data-filter="all">全部</button><button class="filter" data-filter="active">进行中</button><button class="filter" data-filter="failed">失败 / 中断</button><button class="filter" data-filter="cancelled">已取消</button></nav>
+      <div class="settings"><label><input id="capture" type="checkbox">操作后截图</label><button id="clear" class="link">清空记录</button></div>
+    </div>
+    <div id="entries" aria-live="polite"></div>
+    <p class="foot" id="foot">记录仅保存在本机。完成一次点击代表动作已送达，页面结果仍需 Agent 验证。</p>
+  </section>
+</main>
+<dialog id="image-dialog"><div class="row"><strong id="image-title">操作后截图</strong><button id="close-image">关闭截图</button></div><img id="full-image" alt="所选操作的截图"></dialog>
+<script>
+const $ = id => document.getElementById(id);
+const names = {list_tabs:'查看标签页',select_tab:'切换标签页',new_tab:'打开新标签页',navigate:'打开页面',observe:'观察页面',snapshot:'查看页面控件',screenshot:'截取页面',click:'点击',click_xy:'点击页面位置',hover:'移动到控件',hover_xy:'移动到页面位置',dblclick:'双击',dblclick_xy:'双击页面位置',right_click:'右键点击',right_click_xy:'右键点击页面位置',type:'输入内容',fill:'填写内容',clear:'清空输入',select:'选择选项',press:'按键',scroll:'滚动页面',get_text:'读取页面文字',wait:'等待',wait_for_text:'等待页面文字',wait_for_url:'等待页面跳转',wait_for_idle:'等待页面加载',emulate:'调整页面尺寸',console:'查看控制台',network_errors:'查看网络错误',attach_cdp:'连接应用',detach_cdp:'断开应用',reload_extension:'重新加载扩展'};
+const statuses = {queued:'等待中',running:'正在执行',succeeded:'已完成',failed:'失败',cancelled:'已取消',expired:'已过期',interrupted:'已中断'};
+let state, filter='all', previous='', busy=false, holdList=false;
+function node(tag, className, text){const el=document.createElement(tag);if(className)el.className=className;if(text!==undefined)el.textContent=text;return el;}
+function notice(text,error=false){$('notice').hidden=!text;$('notice').textContent=text;$('notice').className='banner'+(error?' error':'');}
+async function api(path,body){const response=await fetch('/timeline/'+path,body===undefined?{cache:'no-store'}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await response.json();if(!response.ok){const error=new Error(data.error||'连接失败');error.status=response.status;throw error;}return data;}
+function time(value){return new Date(value).toLocaleTimeString('zh-CN',{hour12:false});}
+function summary(entry){const result=entry.result||{};if(entry.error)return entry.error;if(entry.status==='queued')return '等待前面的操作结束。';if(entry.status==='running')return '正在执行动作并收集结果。';if(result.found===true)return '已找到预期的页面状态。';if(result.via)return '动作已送达 · '+(result.via==='trusted'?'可信输入':'模拟输入')+'。页面结果由后续观察验证。';if(entry.method==='get_text')return '已读取页面文字'+(result.length!==undefined?' · '+result.length+' 字符':'')+'。';if(result.elementCount!==undefined)return '已获取 '+result.elementCount+' 个页面控件。';if(result.tabCount!==undefined)return '已发现 '+result.tabCount+' 个标签页。';return '已收到工具结果。';}
+function displayed(entry){
+  if(!entry.target)return !['queued','running'].includes(entry.status)||['wait','reload_extension'].includes(entry.method);
+  try{const url=new URL(entry.target.url);return !(url.origin===location.origin&&url.pathname.startsWith('/timeline'));}catch{return true;}
+}
+function render(data){
+  state=data;const visibleEntries=data.entries.filter(displayed);$('login').hidden=true;$('dashboard').hidden=false;$('controls').hidden=false;
+  $('mode').textContent=data.mode==='pausing'?'正在结束当前动作':data.paused?'你已接管':'Agent 可操作';$('mode-dot').className='dot'+(data.paused?' warn':'');
+  $('connection').textContent=data.connection.mode==='cdp'?'已连接应用':data.connection.extension?'Chrome 已连接':'等待 Chrome 扩展';$('count').textContent=visibleEntries.length+' 步';
+  $('pause').hidden=data.paused;$('resume').hidden=!data.paused;$('resume').disabled=busy||!!data.activeId||data.connection.inFlight>0;$('pause').disabled=busy;
+  $('capture').checked=data.captureScreenshots;$('capture').disabled=busy;$('clear').disabled=busy||data.connection.inFlight>0||data.entries.some(entry=>['queued','running'].includes(entry.status));
+  $('foot').textContent='仅保存在本机 · 最近 '+data.maxEntries+' 步 · 时间线截图最多 '+Math.round(data.maxImageBytes/1024/1024)+' MB。完成点击代表动作已送达，页面结果仍需 Agent 验证。';
+  notice(data.storageError||(data.mode==='pausing'?'已阻止后续操作，等待中的动作已取消。已经发给浏览器的动作仍可能完成，无法撤回。':data.paused?'自动操作已停止，你可以手动使用浏览器。点击“交还 Agent”后才允许新操作；已取消的动作不会重放。':''),!!data.storageError);
+  if(holdList)return;
+  const hash=JSON.stringify(visibleEntries)+filter;if(hash===previous)return;previous=hash;
+  const open=new Set([...document.querySelectorAll('details[open]')].map(el=>el.dataset.id));$('entries').replaceChildren();
+  const shown=visibleEntries.filter(entry=>filter==='all'||filter==='active'&&['queued','running'].includes(entry.status)||filter==='failed'&&['failed','expired','interrupted'].includes(entry.status)||filter==='cancelled'&&entry.status==='cancelled');
+  if(!shown.length){const empty=node('div','empty');empty.append(node('strong','',visibleEntries.length?'这里暂时没有记录':'等待 Agent 的第一步操作'),node('div','',visibleEntries.length?'切换筛选可以查看其他操作。':'通过 Agent Hand 操作浏览器后，目标页面、动作和结果会出现在这里。'));$('entries').append(empty);return;}
+  for(const entry of shown){
+    const card=node('article','entry'),heading=node('div','row'),title=node('div','entry-title',(names[entry.method]||entry.method)+(entry.element?'「'+entry.element+'」':''));title.append(node('span','badge '+entry.status,statuses[entry.status]||entry.status));
+    const duration=entry.startedAt&&entry.finishedAt?' · '+((new Date(entry.finishedAt)-new Date(entry.startedAt))/1000).toFixed(1)+'s':'';heading.append(title,node('time','entry-time',time(entry.queuedAt)+duration));card.append(heading);
+    const target=node('div','target');target.append(node('strong','',entry.target?entry.target.title||'未命名页面':entry.method==='wait'?'本地等待 · 无页面操作':entry.method==='reload_extension'?'Chrome 扩展':'未获取到目标页面'));if(entry.target)target.append(node('div','',entry.target.url+' · Tab '+entry.target.tabId));card.append(target);
+    const content=node('div','content'),info=node('div','summary');info.append(node('p','result'+(entry.error?' failure':''),summary(entry)));if(entry.result?.warning)info.append(node('p','capture-note',entry.result.warning));if(entry.screenshotError)info.append(node('p','capture-note','截图：'+entry.screenshotError));
+    const detail=node('details','');detail.dataset.id=entry.id;detail.open=open.has(entry.id);detail.append(node('summary','','查看详情'),node('pre','',JSON.stringify({operation:entry.method,parameters:entry.params,result:entry.result,error:entry.error},null,2)));info.append(detail);content.append(info);
+    if(entry.screenshot){const button=node('button','thumb'),img=node('img');img.src='/timeline/image/'+entry.id+'.png';img.alt='查看「'+(names[entry.method]||entry.method)+'」后的截图';img.loading='lazy';button.append(img,node('span','',entry.screenshot.width+' × '+entry.screenshot.height+' · 查看截图'));button.addEventListener('click',()=>{$('image-title').textContent=(names[entry.method]||entry.method)+' · '+time(entry.queuedAt);$('full-image').src=img.src;$('image-dialog').showModal();});content.append(button);}
+    card.append(content);$('entries').append(card);
+  }
+}
+async function control(path,body={}){if(busy)return;busy=true;if(state)render(state);try{render(await api(path,body));}catch(error){notice(error.message,true);}finally{busy=false;if(state){$('pause').disabled=false;$('resume').disabled=!!state.activeId||state.connection.inFlight>0;$('capture').disabled=false;$('clear').disabled=state.connection.inFlight>0||state.entries.some(entry=>['running','queued'].includes(entry.status));}}}
+$('entries').addEventListener('pointerenter',()=>{holdList=true;});
+$('entries').addEventListener('pointerleave',()=>{holdList=false;if(state)render(state);});
+$('entries').addEventListener('focusin',()=>{holdList=true;});
+$('entries').addEventListener('focusout',event=>{if(!$('entries').contains(event.relatedTarget)){holdList=false;if(state)render(state);}});
+$('pause').addEventListener('click',()=>control('pause'));$('resume').addEventListener('click',()=>control('resume'));$('clear').addEventListener('click',()=>control('clear'));$('capture').addEventListener('change',event=>control('settings',{captureScreenshots:event.target.checked}));$('close-image').addEventListener('click',()=>$('image-dialog').close());
+for(const button of document.querySelectorAll('[data-filter]'))button.addEventListener('click',()=>{filter=button.dataset.filter;for(const item of document.querySelectorAll('[data-filter]'))item.classList.toggle('active',item===button);if(state)render(state);});
+$('login').addEventListener('submit',async event=>{event.preventDefault();try{await api('session',{token:$('token').value});$('token').value='';render(await api('api'));}catch(error){notice(error.message,true);}});
+async function poll(){try{render(await api('api'));}catch(error){$('controls').hidden=true;if(error.status===401){$('dashboard').hidden=true;$('login').hidden=false;notice('连接已失效，请重新从 Agent Hand 打开时间线，或使用本机连接密钥。');}else notice('暂时无法连接本机 Agent Hand，正在重试。',true);}finally{setTimeout(poll,1000);}}
+(async()=>{const pair=new URLSearchParams(location.hash.slice(1)).get('pair');history.replaceState(null,'',location.pathname);if(pair){try{await api('session',{pair});}catch(error){notice(error.message,true);}}poll();})();
+</script>
+</body>
+</html>

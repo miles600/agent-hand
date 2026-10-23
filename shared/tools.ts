@@ -12,6 +12,11 @@ const empty = {
 
 export const TOOLS: Tool[] = [
   {
+    name: 'timeline',
+    description: 'Return a short-lived local operation-timeline link. The user can inspect target tabs, actions, screenshots, results, and failures, stop queued work, and take over manually. Available while paused. Only the user should resume automation from the timeline.',
+    inputSchema: empty,
+  },
+  {
     name: 'list_tabs',
     description: 'List Chrome tabs. Later commands use the target tab (the last select_tab, otherwise the active tab).',
     inputSchema: empty,

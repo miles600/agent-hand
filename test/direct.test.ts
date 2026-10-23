@@ -143,7 +143,7 @@ test('direct CDP session falls back without closing the app', async () => {
 test('bridge routes page commands to CDP and then back to the extension', async () => {
   const mock = await startMock({ hangInput: false });
   const dir = await mkdtemp(join(tmpdir(), 'agent-hand-cdp-'));
-  const server = await startBridge({
+  const server = await startBridge({ timeline: false,
     port: 0,
     token: 'test-token-0123456789abcdef',
     demoDir: join(process.cwd(), 'demo'),
