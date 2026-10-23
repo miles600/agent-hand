@@ -64,8 +64,6 @@ export async function startBridge(options: BridgeOptions): Promise<BridgeHandle>
     });
   });
 
-  const wss = new WebSocketServer({ server: httpServer, maxPayload: 32 * 1024 * 1024 });
-
   await new Promise<void>((resolve, reject) => {
     const onError = (error: Error) => {
       httpServer.off('error', onError);
@@ -77,6 +75,8 @@ export async function startBridge(options: BridgeOptions): Promise<BridgeHandle>
       resolve();
     });
   });
+
+  const wss = new WebSocketServer({ server: httpServer, maxPayload: 32 * 1024 * 1024 });
 
   function addressPort(): number {
     const address = httpServer.address();

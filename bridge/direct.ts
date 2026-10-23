@@ -638,6 +638,8 @@ export class DirectSession {
     await this.cursor(x, y, `Scroll ${direction}`, 420);
     const amount = typeof params.amount === 'number' ? params.amount : 480;
     const delta = wheelDelta(direction, amount);
+    let via: Via = 'trusted';
+    let warning: string | undefined;
     try {
       await this.input('Input.dispatchMouseEvent', {
         type: 'mouseWheel',
@@ -647,23 +649,19 @@ export class DirectSession {
         deltaY: delta.y,
         pointerType: 'mouse',
       });
-      return { direction, amount, x, y, devicePixelRatio: metrics.devicePixelRatio, via: 'trusted', mode: 'cdp' };
     } catch (error) {
       if (!isInputFallbackError(error)) throw error;
       const reason = error instanceof Error ? error.message : String(error);
       if (requiresTrustedInput(params)) throw trustedInputRequiredError(reason);
       await this.callApi(main.id, 'syntheticScroll', [x, y, delta.x, delta.y]);
-      return {
-        warning: syntheticInputWarning(reason),
-        direction,
-        amount,
-        x,
-        y,
-        devicePixelRatio: metrics.devicePixelRatio,
-        via: 'synthetic',
-        mode: 'cdp',
-      };
+      via = 'synthetic';
+      warning = syntheticInputWarning(reason);
     }
+    await Promise.all(this.defaultContexts().map((ctx) =>
+      this.callApi(ctx.id, 'waitForScroll', [], 3000).catch((error: unknown) => {
+        if (ctx.id === main.id) throw error;
+      })));
+    return { ...(warning ? { warning } : {}), direction, amount, x, y, devicePixelRatio: metrics.devicePixelRatio, via, mode: 'cdp' };
   }
 
   private async screenshot(): Promise<unknown> {

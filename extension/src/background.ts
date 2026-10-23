@@ -802,17 +802,29 @@ async function scroll(params: Record<string, unknown>): Promise<unknown> {
   await cursorMove(tabId, at.x, at.y, `Scroll ${direction}`, 420);
   const amount = typeof params.amount === 'number' ? params.amount : 480;
   const delta = wheelDelta(direction, amount);
+  let via: 'trusted' | 'synthetic' = 'trusted';
+  let warning: string | undefined;
   try {
     await mouseWheel(tabId, at.x, at.y, delta.x, delta.y);
-    return { direction, amount, x: at.x, y: at.y, devicePixelRatio: metrics.devicePixelRatio, via: 'trusted' };
   } catch (error) {
     if (!isInputFallbackError(error)) throw error;
     const reason = inputReason(error);
     if (requiresTrustedInput(params)) throw trustedInputRequiredError(reason);
     await restoreAttached(tabId);
     await ask(tabId, 0, 'synthetic-scroll', { x: at.x, y: at.y, deltaX: delta.x, deltaY: delta.y });
-    return { warning: syntheticInputWarning(reason), direction, amount, x: at.x, y: at.y, devicePixelRatio: metrics.devicePixelRatio, via: 'synthetic' };
+    via = 'synthetic';
+    warning = syntheticInputWarning(reason);
   }
+  await waitForScroll(tabId);
+  return { ...(warning ? { warning } : {}), direction, amount, x: at.x, y: at.y, devicePixelRatio: metrics.devicePixelRatio, via };
+}
+
+async function waitForScroll(tabId: number): Promise<void> {
+  const frames = await getAllFrames(tabId);
+  await Promise.all(relevantFrames(frames).map((frame) =>
+    ask(tabId, frame.frameId, 'wait-for-scroll', {}, 3000).catch((error: unknown) => {
+      if (frame.frameId === 0) throw error;
+    })));
 }
 
 async function screenshot(): Promise<unknown> {

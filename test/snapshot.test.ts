@@ -68,10 +68,26 @@ test('snapshot reports checkbox and radio state', () => {
 test('snapshot caps the list and keeps the viewport line', () => {
   const raw = Array.from({ length: MAX_SNAPSHOT_ITEMS + 3 }, (_, index) =>
     element({ ahId: `e${index}`, name: `Item ${index}`, x: index, y: index }));
-  const built = buildSnapshot(raw, { cssWidth: 100, cssHeight: 100, devicePixelRatio: 1 });
+  const built = buildSnapshot(raw, { cssWidth: 1000, cssHeight: 1000, devicePixelRatio: 1 });
   assert.equal(built.items.length, MAX_SNAPSHOT_ITEMS);
   assert.equal(built.items[0].ref, 1);
   assert.match(built.text, /… 3 more$/);
+});
+
+test('snapshot excludes controls outside the top viewport before assigning refs or applying the cap', () => {
+  const offscreen = Array.from({ length: MAX_SNAPSHOT_ITEMS }, (_, index) =>
+    element({ ahId: `off${index}`, frameId: 1, name: 'Offscreen iframe', x: 10, y: -100 }));
+  const built = buildSnapshot([
+    ...offscreen,
+    element({ ahId: 'below', frameId: 1, name: 'Below', x: 10, y: 100 }),
+    element({ ahId: 'left', name: 'Left', x: -40, y: 10 }),
+    element({ ahId: 'right', name: 'Right', x: 100, y: 10 }),
+    element({ ahId: 'empty', name: 'Empty', x: 10, y: 10, width: 0 }),
+    element({ ahId: 'partial', frameId: 1, name: 'Partial iframe', x: -10, y: -10 }),
+    element({ ahId: 'visible', name: 'Visible', x: 10, y: 80 }),
+  ], { cssWidth: 100, cssHeight: 100, devicePixelRatio: 2 });
+  assert.deepEqual(built.items.map((item) => [item.ref, item.name]), [[1, 'Partial iframe'], [2, 'Visible']]);
+  assert.doesNotMatch(built.text, /more|Offscreen|Below|Left|Right|Empty/);
 });
 
 test('click coordinates stay in CSS pixels', () => {

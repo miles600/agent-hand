@@ -21,19 +21,11 @@ export function serveMcp(hand: Hand, options?: { requireTrusted?: boolean }): Pr
     const onData = (chunk: Buffer) => {
       buffer = Buffer.concat([buffer, chunk]);
       while (true) {
-        const headerEnd = buffer.indexOf('\r\n\r\n');
-        if (headerEnd === -1) return;
-        const header = buffer.subarray(0, headerEnd).toString('utf8');
-        const match = header.match(/Content-Length:\s*(\d+)/i);
-        if (!match) {
-          buffer = buffer.subarray(headerEnd + 4);
-          continue;
-        }
-        const length = Number(match[1]);
-        const start = headerEnd + 4;
-        if (buffer.length < start + length) return;
-        const body = buffer.subarray(start, start + length).toString('utf8');
-        buffer = buffer.subarray(start + length);
+        const end = buffer.indexOf('\n');
+        if (end === -1) return;
+        const body = buffer.subarray(0, end).toString('utf8').trim();
+        buffer = buffer.subarray(end + 1);
+        if (!body) continue;
         let message: Rpc;
         try {
           message = JSON.parse(body) as Rpc;
@@ -115,7 +107,5 @@ async function handle(hand: Hand, message: Rpc, requireTrusted: boolean): Promis
 }
 
 function send(message: unknown): void {
-  const payload = Buffer.from(JSON.stringify(message), 'utf8');
-  process.stdout.write(`Content-Length: ${payload.length}\r\n\r\n`);
-  process.stdout.write(payload);
+  process.stdout.write(`${JSON.stringify(message)}\n`);
 }
