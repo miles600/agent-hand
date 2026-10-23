@@ -27,7 +27,11 @@ export function buildSnapshot(
   raw: RawElement[],
   meta: ViewportMeta,
 ): { text: string; items: SnapshotItem[] } {
-  const sorted = [...raw].sort((a, b) => a.y - b.y || a.x - b.x || a.ahId.localeCompare(b.ahId));
+  const visible = raw.filter((element) =>
+    element.width > 0 && element.height > 0
+    && element.x < meta.cssWidth && element.y < meta.cssHeight
+    && element.x + element.width > 0 && element.y + element.height > 0);
+  const sorted = visible.sort((a, b) => a.y - b.y || a.x - b.x || a.ahId.localeCompare(b.ahId));
   const items = sorted.slice(0, MAX_SNAPSHOT_ITEMS).map((element, index) => ({
     ref: index + 1,
     ahId: element.ahId,

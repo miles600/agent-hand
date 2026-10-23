@@ -121,6 +121,16 @@ test('a bridge started with requireTrusted forwards it on click', async () => {
   }
 });
 
+test('an occupied bridge port rejects without an unhandled WebSocket server error', async () => {
+  const server = await startBridge({ port: 0, token: TOKEN });
+  try {
+    await assert.rejects(() => startBridge({ port: server.port, token: TOKEN }), { code: 'EADDRINUSE' });
+    assert.equal((await fetch(`http://127.0.0.1:${server.port}/health`)).ok, true);
+  } finally {
+    await server.close();
+  }
+});
+
 async function connectExtension(port: number): Promise<WebSocket> {
   const ws = new WebSocket(`ws://127.0.0.1:${port}`);
   await once(ws, 'open');

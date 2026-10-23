@@ -1,4 +1,5 @@
 import { MAX_SNAPSHOT_ITEMS } from '../../shared/snapshot.js';
+import { waitForScroll } from '../../shared/scroll.js';
 
 type Box = { x: number; y: number; width: number; height: number };
 type PageElement = {
@@ -28,6 +29,7 @@ export type PageApi = {
   frameOffset: () => { x: number; y: number } | null;
   iframeRects: () => FrameRect[];
   scrollFrame: (url: string) => void;
+  waitForScroll: () => Promise<void>;
   focus: (ahId: string) => void;
   metrics: () => { cssWidth: number; cssHeight: number; devicePixelRatio: number };
   /** Real window chrome, read before a device-metrics override replaces innerWidth. */
@@ -127,6 +129,7 @@ export function installPageApi(): PageApi {
     frameOffset,
     iframeRects,
     scrollFrame,
+    waitForScroll: () => waitForScroll(window),
     focus,
     metrics,
     windowChrome,

@@ -65,6 +65,7 @@ test('direct CDP session falls back without closing the app', async () => {
       assert.ok(mock.expressions.some((expression) => expression.includes('api["syntheticKey"]')));
       const scrolled = await session.call('scroll', { direction: 'down', amount: 100 }) as { via: string };
       assert.equal(scrolled.via, 'synthetic');
+      assert.ok(mock.expressions.some((expression) => expression.includes('api["waitForScroll"]')));
       const logs = await session.call('console', {}) as { messages: { text: string }[] };
       assert.ok(logs.messages.some((message) => message.text.includes('from cdp') || message.text.includes('from page')));
       const network = await session.call('network_errors', {}) as { errors: { status: number; url: string }[] };

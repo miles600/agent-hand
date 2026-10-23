@@ -48,6 +48,13 @@ function installListener(api: PageApi): void {
       sendResponse({ ok: true });
       return undefined;
     }
+    if (msg.type === 'wait-for-scroll') {
+      void api.waitForScroll().then(
+        () => sendResponse({ ok: true }),
+        (error: unknown) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }),
+      );
+      return true;
+    }
     if (msg.type === 'focus') {
       api.focus(String(msg.ahId));
       sendResponse({ ok: true });
