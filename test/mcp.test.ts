@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { promisify } from 'node:util';
+import { WebSocket } from 'ws';
 import { startBridge } from '../bridge/server.js';
 
 for (const reuse of [false, true]) {
@@ -27,6 +29,7 @@ for (const reuse of [false, true]) {
       assert.equal(init.id, 1);
       assert.equal(init.result.serverInfo.name, 'agent-hand');
       assert.equal(init.result.protocolVersion, '2024-11-05');
+      assert.match(init.result.instructions, /observe.*verify/i);
 
       proc.stdin.write(frame({ jsonrpc: '2.0', method: 'notifications/initialized' }));
       proc.stdin.write(frame({ jsonrpc: '2.0', id: 2, method: 'tools/list' }));
@@ -41,6 +44,8 @@ for (const reuse of [false, true]) {
 
       proc.stdin.write('{invalid json}\n');
       assert.equal((await reader.next()).error?.code, -32700);
+      proc.stdin.write('null\n');
+      assert.equal((await reader.next()).error?.code, -32600);
       const unicode = frame({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: '不存在' } });
       const split = unicode.indexOf(Buffer.from('不')) + 1;
       proc.stdin.write(unicode.subarray(0, split));
@@ -86,6 +91,91 @@ for (const reuse of [false, true]) {
         assert.equal((await fetch(`http://127.0.0.1:${server.port}/health`)).ok, true);
         await server.close();
       }
+    }
+  });
+}
+
+for (const images of [true, false]) {
+  test(`MCP screenshots and observe deliver ${images ? 'PNG image content' : 'explicit text-only fallback'}`, async () => {
+    const home = await mkdtemp(join(tmpdir(), 'agent-hand-images-'));
+    const token = 'mcp-image-test-0123456789';
+    const server = await startBridge({ port: 0, token, screenshotDir: home });
+    const env = { ...process.env, AGENT_HAND_HOME: home, AGENT_HAND_TOKEN: token, AGENT_HAND_PORT: String(server.port), AGENT_HAND_MCP_IMAGES: images ? '1' : '0' };
+    const proc = spawn('node', ['dist/bridge/index.js', 'mcp'], { cwd: process.cwd(), env, stdio: ['pipe', 'pipe', 'pipe'] });
+    const reader = new RpcReader(proc);
+    const extension = new WebSocket(`ws://127.0.0.1:${server.port}`);
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+    let failCapture = false;
+    try {
+      await new Promise<void>((resolve, reject) => { extension.once('open', resolve); extension.once('error', reject); });
+      const authed = new Promise(resolve => extension.once('message', resolve));
+      extension.send(JSON.stringify({ type: 'auth', role: 'extension', token }));
+      await authed;
+      extension.on('message', data => {
+        const msg = JSON.parse(String(data)) as { type: string; method: string; id: string };
+        if (msg.type !== 'command') return;
+        const failed = failCapture && msg.method === 'screenshot';
+        const payload = msg.method === 'screenshot'
+          ? { base64: png, cssWidth: 1, cssHeight: 1, devicePixelRatio: 1, warning: 'capture warning' }
+          : { tabId: 7, text: 'viewport 1x1 dpr 1', url: 'http://example.test', title: 'Test' };
+        extension.send(JSON.stringify({ type: 'result', id: msg.id, ok: !failed, data: payload, error: failed ? 'capture failed' : undefined }));
+      });
+
+      for (const [id, name, args] of [[1, 'screenshot', {}], [2, 'observe', { tabId: 7, includeScreenshot: true }]] as const) {
+        proc.stdin.write(frame({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }));
+        const result = (await reader.next()).result;
+        assert.equal(result.isError, false);
+        const metadata = JSON.parse(result.content[0].text) as Record<string, any>;
+        assert.equal(metadata.imageDelivery, images ? 'image' : 'text-only');
+        const shot = name === 'observe' ? metadata.screenshot : metadata;
+        assert.equal(shot.width, 1);
+        assert.equal(shot.warning, 'capture warning');
+        assert.equal(shot.base64, undefined);
+        if (images) {
+          assert.equal(result.content.length, 2);
+          assert.equal(result.content[1].type, 'image');
+          assert.equal(result.content[1].mimeType, 'image/png');
+          assert.equal(result.content[1].data, png);
+        } else {
+          assert.equal(result.content.length, 1);
+          assert.match(metadata.imageWarning, /disabled.*image-viewing/);
+        }
+      }
+
+      if (images) {
+        const { stdout } = await promisify(execFile)(process.execPath, ['scripts/check-mcp.mjs', '--tab', '7'], { env });
+        const report = JSON.parse(stdout);
+        assert.equal(report.checks.pngImage, 'pass');
+        assert.equal(report.checks.observation, 'pass');
+        assert.equal(report.checks.modelVision, 'not-tested');
+        assert.equal(report.image.width, 1);
+        assert.ok(!stdout.includes(token));
+        assert.ok(!stdout.includes(png));
+      } else {
+        await assert.rejects(
+          promisify(execFile)(process.execPath, ['scripts/check-mcp.mjs', '--tab', '7'], { env }),
+          (error: unknown) => {
+            const report = JSON.parse((error as { stdout: string }).stdout);
+            assert.match(report.error, /No MCP image content/);
+            assert.equal(report.checks.modelVision, 'not-tested');
+            return true;
+          },
+        );
+      }
+
+      failCapture = true;
+      proc.stdin.write(frame({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'screenshot' } }));
+      const failed = (await reader.next()).result;
+      assert.equal(failed.isError, true);
+      assert.equal(failed.content.length, 1);
+      assert.match(failed.content[0].text, /capture failed/);
+    } finally {
+      proc.stdin.end();
+      await Promise.race([onceExit(proc), new Promise(resolve => setTimeout(resolve, 1000))]);
+      if (proc.exitCode == null) proc.kill('SIGKILL');
+      extension.close();
+      await server.close();
+      await rm(home, { recursive: true, force: true });
     }
   });
 }
@@ -138,9 +228,10 @@ type Rpc = {
   result: {
     serverInfo: { name: string };
     protocolVersion: string;
+    instructions: string;
     tools: { name: string }[];
     isError?: boolean;
-    content: { text: string }[];
+    content: { type: string; text: string; data?: string; mimeType?: string }[];
   };
 };
 

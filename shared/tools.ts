@@ -32,6 +32,16 @@ export const TOOLS: Tool[] = [
     },
   },
   {
+    name: 'new_tab',
+    description: 'Open an http(s) URL in a fresh Chrome tab, wait for loading, and select it as the target. Use for a separate task or disposable test page. Available in extension mode only.',
+    inputSchema: {
+      type: 'object',
+      properties: { url: { type: 'string', description: 'Absolute http or https URL.' } },
+      required: ['url'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'navigate',
     description: 'Open an http(s) URL in the target tab and wait until it finishes loading.',
     inputSchema: {
@@ -44,9 +54,21 @@ export const TOOLS: Tool[] = [
     },
   },
   {
+    name: 'observe',
+    description: 'Observe the target tab: return its URL, title, tabId, viewport, and fresh snapshot refs, optionally with a PNG screenshot as MCP image content. Pass tabId from list_tabs to select the tab in the same queued operation. Use after page changes and to verify action results. Snapshot and image are captured sequentially; animations can still change the page.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tabId: { anyOf: [{ type: 'integer' }, { type: 'string' }], description: 'Optional tab id from list_tabs.' },
+        includeScreenshot: { type: 'boolean', description: 'Include a screenshot. Default false.' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'snapshot',
     description:
-      'List visible interactive elements. The first line is the effective viewport in CSS pixels, for example "viewport 390x844 dpr 3". Use that line to verify emulate. Each later line starts with a numeric ref. Refs stay valid until the next snapshot. Boxes are CSS pixels: x,y widthxheight. "checked" or "unchecked" is the state of a checkbox, radio, or switch. "frame" marks an element inside an iframe. A uni-app date picker is listed as the clickable wrapper, not as a disabled textbox. Image and card tiles are named from alt text, aria-label, inner text, or a nearby label.',
+      'List visible interactive elements. The first line is the effective viewport in CSS pixels, for example "viewport 390x844 dpr 3". Use that line to verify emulate. Each later line starts with a numeric ref. Refs belong to this snapshot and target tab. Observe again after page changes; do not reuse old refs. Boxes are CSS pixels: x,y widthxheight. "checked" or "unchecked" is the state of a checkbox, radio, or switch. "frame" marks an element inside an iframe. A uni-app date picker is listed as the clickable wrapper, not as a disabled textbox. Image and card tiles are named from alt text, aria-label, inner text, or a nearby label.',
     inputSchema: empty,
   },
   {
@@ -251,7 +273,7 @@ export const TOOLS: Tool[] = [
   {
     name: 'screenshot',
     description:
-      'Capture a PNG of the page. When the debugger is attached the image is the emulated viewport (cssWidth times devicePixelRatio by cssHeight times devicePixelRatio), not the white margin around it. Otherwise it is the visible tab, and devicePixelRatio is the scale of that image. The agent cursor is part of the page, so it appears in the image.',
+      'Capture a PNG of the page. MCP returns native image content plus file metadata; CLI returns the file metadata. When the debugger is attached the image is the emulated viewport (cssWidth times devicePixelRatio by cssHeight times devicePixelRatio), not the white margin around it. Otherwise it is the visible tab, and devicePixelRatio is the scale of that image. The agent cursor is part of the page, so it appears in the image.',
     inputSchema: {
       type: 'object',
       properties: {

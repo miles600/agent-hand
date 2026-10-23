@@ -114,7 +114,7 @@ node dist/bridge/index.js screenshot
 
 You should see one blue cursor travel to the button, a ripple, and the line “Trusted clicks: 1”. Chrome’s yellow bar appears the first time the debugger attaches. Leave it.
 
-`screenshot` writes a PNG under `~/.agent-hand/screenshots` (`%USERPROFILE%\.agent-hand\screenshots` on Windows) and prints the path. Boxes in the snapshot are CSS pixels. When the debugger is attached, the PNG is the emulated viewport: `cssWidth * devicePixelRatio` by `cssHeight * devicePixelRatio`, clipped with `Page.captureScreenshot` so the white margin and the browser chrome are not in the file. `captureVisibleTab` is only the fallback when the debugger is not attached, and `devicePixelRatio` is then the scale of that image.
+`screenshot` returns native MCP image content alongside the PNG file metadata. Clients must forward that image to the model; a file path alone does not provide vision. The CLI writes a PNG under `~/.agent-hand/screenshots` (`%USERPROFILE%\.agent-hand\screenshots` on Windows) and prints the path. Boxes in the snapshot are CSS pixels. When the debugger is attached, the PNG is the emulated viewport: `cssWidth * devicePixelRatio` by `cssHeight * devicePixelRatio`, clipped with `Page.captureScreenshot` so the white margin and the browser chrome are not in the file. `captureVisibleTab` is only the fallback when the debugger is not attached, and `devicePixelRatio` is then the scale of that image.
 
 Scroll the buried button into view and click it:
 
@@ -135,7 +135,9 @@ agent-hand attach <http://127.0.0.1:port>
 agent-hand detach
 agent-hand list-tabs
 agent-hand select-tab <tabId>
+agent-hand new-tab <url>
 agent-hand navigate <url>
+agent-hand observe [--screenshot]
 agent-hand snapshot
 agent-hand click <ref>
 agent-hand click-xy <x> <y>
@@ -259,7 +261,15 @@ command = "node"
 args = ["/absolute/path/to/agent-hand/dist/bridge/index.js", "mcp"]
 ```
 
-Pi and other shell agents can skip MCP and run the CLI. The tools are `list_tabs`, `select_tab`, `navigate`, `snapshot`, `click`, `hover`, `dblclick`, `right_click`, and the `_xy` forms of those, `locate`, `type`, `clear`, `fill`, `select`, `press`, `scroll`, `emulate`, `screenshot`, `get_text`, `console`, `network_errors`, `attach_cdp`, `detach_cdp`, `reload_extension`, `wait`, `wait_for_text`, `wait_for_url`, and `wait_for_idle`.
+Pi and other shell agents can skip MCP and run the CLI. The tools are `list_tabs`, `select_tab`, `new_tab`, `navigate`, `observe`, `snapshot`, `click`, `hover`, `dblclick`, `right_click`, and the `_xy` forms of those, `locate`, `type`, `clear`, `fill`, `select`, `press`, `scroll`, `emulate`, `screenshot`, `get_text`, `console`, `network_errors`, `attach_cdp`, `detach_cdp`, `reload_extension`, `wait`, `wait_for_text`, `wait_for_url`, and `wait_for_idle`.
+
+## Observe, verify, and check client compatibility
+
+Use `observe({tabId, includeScreenshot:true})` to select an existing tab and return a fresh snapshot plus screenshot in one queued bridge operation. Snapshot metadata includes the tab ID, URL, title, and viewport. Other bridge commands cannot interleave those captures; the page can still animate between them. Omit `includeScreenshot` for a cheaper text observation. CLI: `agent-hand observe [--screenshot]` after selecting a tab.
+
+Load the small [Agent Hand Skill](skills/agent-hand/SKILL.md) to guide observation, action, verification, and recovery. For Codex, copy the `skills/agent-hand` folder into `~/.codex/skills/`. Other agents can use their Skill loader or project instructions. The MCP initialize response also carries the essential workflow.
+
+Run `npm run check:mcp` for protocol/tool discovery, or `npm run check:mcp -- --tab <test-tab-id>` to also verify native PNG delivery. Follow the [client compatibility guide](docs/client-compatibility.md) for a canvas-based visual test in Codex, Cursor, ZCode, TRAE, or WorkBuddy. The transport probe never claims that another client's model saw the image. Use `AGENT_HAND_MCP_IMAGES=0` only for clients that require text-only results.
 
 ## How a click works
 

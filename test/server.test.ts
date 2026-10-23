@@ -90,6 +90,39 @@ test('bridge auth, queue, screenshot file, and demo page', async () => {
   }
 });
 
+test('observe keeps tab selection, snapshot, and screenshot in one queue job', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'agent-hand-observe-'));
+  const server = await startBridge({ port: 0, token: TOKEN, screenshotDir: dir });
+  const extension = await connectExtension(server.port);
+  const seen: string[] = [];
+  extension.on('message', data => {
+    const msg = JSON.parse(String(data)) as { type: string; id: string; method: string };
+    if (msg.type !== 'command') return;
+    seen.push(msg.method);
+    const payload = msg.method === 'screenshot'
+      ? { base64: PNG.toString('base64'), cssWidth: 1, cssHeight: 1, devicePixelRatio: 1 }
+      : { tabId: 7, text: 'viewport 1x1 dpr 1', method: msg.method };
+    setTimeout(() => extension.send(JSON.stringify({ type: 'result', id: msg.id, ok: true, data: payload })), 10);
+  });
+  try {
+    const [observed] = await Promise.all([
+      server.call('observe', { tabId: 7, includeScreenshot: true }),
+      server.call('click', { ref: 1 }),
+    ]) as [{ snapshot: { tabId: number }; screenshot: { path: string } }, unknown];
+    assert.deepEqual(seen, ['select_tab', 'snapshot', 'screenshot', 'click']);
+    assert.equal(observed.snapshot.tabId, 7);
+    assert.deepEqual(await readFile(observed.screenshot.path), PNG);
+    seen.length = 0;
+    const textOnly = await server.call('observe') as { screenshot?: unknown };
+    assert.deepEqual(seen, ['snapshot']);
+    assert.equal(textOnly.screenshot, undefined);
+  } finally {
+    extension.close();
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('a bridge started with requireTrusted forwards it on click', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'agent-hand-server-'));
   const server = await startBridge({

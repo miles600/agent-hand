@@ -285,6 +285,8 @@ async function dispatch(method: string, params: Record<string, unknown>): Promis
     case 'select_tab':
       if (typeof params.tabId !== 'number') throw new Error('tabId must be a number from list-tabs');
       return selectTab(params.tabId);
+    case 'new_tab':
+      return newTab(requiredString(params.url, 'url'));
     case 'navigate':
       return navigate(requiredString(params.url, 'url'));
     case 'snapshot':
@@ -364,6 +366,17 @@ async function selectTab(tabId: number): Promise<unknown> {
   return { id: tab.id, title: tab.title ?? '', url: tab.url ?? '' };
 }
 
+async function newTab(url: string): Promise<unknown> {
+  const tab = await chrome.tabs.create({ url: 'about:blank', active: true });
+  if (tab.id == null) throw new Error('Chrome did not create a tab');
+  await rememberTab(tab.id);
+  try {
+    return await navigate(url);
+  } catch (error) {
+    throw new Error(`tab ${tab.id} was created, but navigation failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 async function navigate(url: string): Promise<unknown> {
   const tab = await targetTab();
   if (tab.id == null) throw new Error('no tab');
@@ -438,6 +451,7 @@ async function snapshot(): Promise<unknown> {
   await rememberRefs(built.items.map((item) => ({ ref: item.ref, ahId: item.ahId, frameId: item.frameId })));
   const fresh = await chrome.tabs.get(tabId);
   return {
+    tabId,
     text: built.text,
     url: fresh.url ?? '',
     title: fresh.title ?? '',

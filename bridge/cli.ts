@@ -167,8 +167,12 @@ function commandCall(command: string, args: string[]): { method: string; params:
       return { method: 'list_tabs', params: {} };
     case 'select-tab':
       return { method: 'select_tab', params: { tabId: requiredArg(args, 0, 'tab id') } };
+    case 'new-tab':
+      return { method: 'new_tab', params: { url: requiredArg(args, 0, 'url') } };
     case 'navigate':
       return { method: 'navigate', params: { url: requiredArg(args, 0, 'url') } };
+    case 'observe':
+      return { method: 'observe', params: { includeScreenshot: args.includes('--screenshot') } };
     case 'snapshot':
       return { method: 'snapshot', params: {} };
     case 'click':
@@ -387,7 +391,7 @@ function clientTimeout(method: string, params: Record<string, unknown>): number 
   if (method === 'wait_for_text' || method === 'wait_for_url' || method === 'wait_for_idle') {
     return Number(params.timeout ?? 10000) + 15000;
   }
-  if (method === 'navigate') return 45000;
+  if (method === 'navigate' || method === 'new_tab') return 45000;
   return 30000;
 }
 
@@ -402,7 +406,9 @@ Usage:
   agent-hand detach                           close the CDP socket; the app stays open
   agent-hand list-tabs
   agent-hand select-tab <tabId>
+  agent-hand new-tab <url>
   agent-hand navigate <url>
+  agent-hand observe [--screenshot]
   agent-hand snapshot
   agent-hand click <ref>
   agent-hand click-xy <x> <y>                 CSS px, same space as snapshot boxes

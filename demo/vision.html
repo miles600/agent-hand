@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Hand vision check</title>
+<style>
+  body { margin: 0; background: #edf2f7; color: #152437; font: 18px system-ui, sans-serif; }
+  main { max-width: 650px; margin: 40px auto; padding: 28px; background: white; border-radius: 16px; }
+  h1 { font-size: 28px; margin-top: 0; }
+  canvas { display: block; max-width: 100%; height: auto; margin: 24px 0; border-radius: 12px; }
+  input, button { font: inherit; padding: 10px; border: 1px solid #8090a3; border-radius: 6px; }
+  button { background: #145cc5; color: white; cursor: pointer; }
+  #result { min-height: 28px; font-weight: 600; }
+</style>
+<main>
+  <h1>Agent Hand vision check</h1>
+  <p>Read the six-character code from a screenshot, then enter it below.</p>
+  <canvas id="card" width="600" height="150" aria-label="Visual code; take a screenshot to read it"></canvas>
+  <form id="check">
+    <label for="answer">Code from screenshot</label><br><br>
+    <input id="answer" autocomplete="off" spellcheck="false" maxlength="6" size="10" required>
+    <button type="submit">Verify code</button>
+  </form>
+  <p id="result" role="status">Waiting for a visual answer.</p>
+  <p>This checks the image path only when your agent reads the MCP image directly. Opening a local PNG is a separate fallback test.</p>
+</main>
+<script>
+(() => {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const random = crypto.getRandomValues(new Uint8Array(6));
+  const code = Array.from(random, value => alphabet[value % alphabet.length]).join('');
+  const context = document.getElementById('card').getContext('2d');
+  context.fillStyle = '#152437';
+  context.fillRect(0, 0, 600, 150);
+  context.fillStyle = '#ffffff';
+  context.font = 'bold 64px monospace';
+  context.textAlign = 'center';
+  context.textBaseline = 'middle';
+  context.fillText(code, 300, 78);
+  document.getElementById('check').addEventListener('submit', event => {
+    event.preventDefault();
+    const correct = document.getElementById('answer').value.trim().toUpperCase() === code;
+    document.getElementById('result').textContent = correct
+      ? 'PASS: visual code matched.'
+      : 'FAIL: code did not match. Take a fresh screenshot and retry.';
+  });
+})();
+</script>
+</html>
