@@ -23,10 +23,11 @@ export const TOOLS: Tool[] = [
   },
   {
     name: 'select_tab',
-    description: 'Focus a tab and make it the target for later commands.',
+    description: 'Focus a tab and make it the target for later commands. Set foreground:true to bring Google Chrome in front of other macOS apps and report whether it succeeded. Default leaves OS foreground unchanged.',
     inputSchema: {
       type: 'object',
       properties: {
+        foreground: { type: 'boolean', description: 'Explicitly bring Google Chrome to the macOS foreground and verify it. Extension mode only.' },
         tabId: {
           anyOf: [{ type: 'integer' }, { type: 'string' }],
           description: 'Tab id from list_tabs. Chrome tabs are numbers. CDP targets are strings.',
@@ -64,6 +65,7 @@ export const TOOLS: Tool[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        foreground: { type: 'boolean', description: 'With tabId, bring Google Chrome to the macOS foreground and verify it. Extension mode only.' },
         tabId: { anyOf: [{ type: 'integer' }, { type: 'string' }], description: 'Optional tab id from list_tabs.' },
         includeScreenshot: { type: 'boolean', description: 'Include a screenshot. Default false.' },
       },

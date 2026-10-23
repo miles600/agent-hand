@@ -7,10 +7,35 @@ import test from 'node:test';
 import { WebSocket } from 'ws';
 import { BridgeClient } from '../bridge/client.js';
 import { startBridge } from '../bridge/server.js';
-import { Timeline } from '../bridge/timeline.js';
+import { safeTitle, Timeline } from '../bridge/timeline.js';
 
 const TOKEN = 'timeline-test-token-0123456789';
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+
+test('timeline headings mask URL-derived titles and preserve normal titles', async () => {
+  for (const title of [
+    'https://user:password@example.test/form?token=secret#private',
+    'example.test/form?token=secret#private',
+    'Read https://example.test/form?token=secret#private',
+  ]) {
+    const safe = safeTitle(title);
+    for (const secret of ['token=secret', 'user:password', '#private']) assert.ok(!safe.includes(secret), safe);
+  }
+  assert.equal(safeTitle('James Webb Space Telescope - Wikipedia'), 'James Webb Space Telescope - Wikipedia');
+  const dir = await mkdtemp(join(tmpdir(), 'agent-hand-title-migration-'));
+  try {
+    const store = new Timeline(dir);
+    const entry = store.add('scroll', { direction: 'down' });
+    entry.target = { tabId: 7, title: 'example.test/form?token=secret', url: 'https://example.test/form?token=%5Bredacted%5D' };
+    store.finish(entry, 'failed');
+    await store.flush();
+    const restored = new Timeline(dir);
+    await restored.load();
+    await restored.flush();
+    assert.ok(!JSON.stringify(restored.entries).includes('token=secret'));
+    assert.ok(!(await readFile(join(dir, 'history.json'), 'utf8')).includes('token=secret'));
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
 
 test('timeline persists bounded records and images, masks inputs, and marks interrupted work', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'agent-hand-timeline-store-'));

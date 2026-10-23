@@ -9,10 +9,11 @@ Use the configured Agent Hand tools; client prefixes may differ. This is an exis
 
 ## Observe → act → verify
 
+- For a visible macOS demo, use `select_tab({tabId, foreground:true})` or `observe({tabId, foreground:true})` and check `foreground.frontmost`. Selecting a browser window alone may leave another app in front; a foreground warning requires manual activation. This is opt-in so background work does not steal focus.
 - Start with `list_tabs`, then `observe({tabId})` on the intended tab. Check URL and title. Add `includeScreenshot:true` for visual layout, canvas, ambiguous controls, or overlays. If `observe` is unavailable, use `select_tab`, `snapshot`, and `screenshot`.
 - Choose refs from the latest observation. Prefer refs and labels over coordinates. Re-observe after navigation, scrolling, opening a menu/dialog, or another page change. Another agent's snapshot replaces the shared refs; use one controller at a time.
 - Use `fill` to replace a field; `type` appends. For a custom dropdown, open it and observe its options before selecting. Coordinates are viewport CSS pixels; divide screenshot pixels by its reported devicePixelRatio.
-- After an action, check the intended result with `wait_for_text`, `wait_for_url`, `observe`, or `get_text`. A delivered click is not evidence that the task succeeded. Use the page's confirmation, changed value, or destination as evidence.
+- After a navigation click, wait for the destination URL before looking for text that may also exist on the old page. After an action, check the intended result with `wait_for_text`, `wait_for_url`, `observe`, or `get_text`. A delivered click is not evidence that the task succeeded. Use the page's confirmation, changed value, or destination as evidence.
 
 ## Recover with fresh evidence
 

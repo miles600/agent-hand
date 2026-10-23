@@ -1,3 +1,4 @@
+import { contentRequest } from '../../shared/content-channel.js';
 import { viewportCssPoint } from '../../shared/coords.js';
 import {
   applyEmulation,
@@ -425,8 +426,16 @@ async function snapshot(): Promise<unknown> {
   let mainOk = false;
   for (const frame of wanted) {
     try {
-      const result = await ask<{ elements: PageElement[] }>(tabId, frame.frameId, 'collect');
-      if (frame.frameId === 0) mainOk = true;
+      let result = await ask<{ elements: PageElement[] }>(tabId, frame.frameId, 'collect');
+      // Overlays can be painted between collection and capture while fading in.
+      // Give an empty main frame a bounded chance to expose its controls.
+      if (frame.frameId === 0) {
+        for (let attempt = 0; !result.elements.length && attempt < 4; attempt += 1) {
+          await sleep(150);
+          result = await ask<{ elements: PageElement[] }>(tabId, frame.frameId, 'collect');
+        }
+        mainOk = true;
+      }
       collected.push({ frameId: frame.frameId, elements: result?.elements ?? [] });
     } catch (error) {
       if (frame.frameId === 0) throw error;
@@ -1057,7 +1066,7 @@ async function ensureReady(tabId: number): Promise<FrameInfo[]> {
   const missing: number[] = [];
   await Promise.all(frames.map(async (frame) => {
     try {
-      const response = await sendToFrame(tabId, frame.frameId, { source: 'agent-hand', type: 'ping-content' }, 800);
+      const response = await sendToFrameOnce(tabId, frame.frameId, { source: 'agent-hand', type: 'ping-content' }, 800);
       if (!response?.ok) missing.push(frame.frameId);
     } catch {
       missing.push(frame.frameId);
@@ -1651,7 +1660,13 @@ async function captureJpeg(windowId: number): Promise<string | null> {
   }
 }
 
-function sendToFrame(tabId: number, frameId: number, message: unknown, timeoutMs: number): Promise<{ ok?: boolean; result?: unknown; error?: string }> {
+function sendToFrame(tabId: number, frameId: number, message: { type: string; [key: string]: unknown }, timeoutMs: number): Promise<{ ok?: boolean; result?: unknown; error?: string }> {
+  return contentRequest(message.type,
+    () => sendToFrameOnce(tabId, frameId, message, timeoutMs),
+    () => ensureReady(tabId));
+}
+
+function sendToFrameOnce(tabId: number, frameId: number, message: unknown, timeoutMs: number): Promise<{ ok?: boolean; result?: unknown; error?: string }> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('content script timed out')), timeoutMs);
     chrome.tabs.sendMessage(tabId, message, { frameId }, (response) => {
