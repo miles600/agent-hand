@@ -173,13 +173,38 @@ function commandCall(command: string, args: string[]): { method: string; params:
       return { method: 'snapshot', params: {} };
     case 'click':
       return { method: 'click', params: { ref: requiredArg(args, 0, 'ref') } };
-    case 'type': {
+    case 'hover':
+      return { method: 'hover', params: { ref: requiredArg(args, 0, 'ref') } };
+    case 'hover-xy':
+      return { method: 'hover_xy', params: { x: requiredArg(args, 0, 'x'), y: requiredArg(args, 1, 'y') } };
+    case 'dblclick':
+    case 'double-click':
+      return { method: 'dblclick', params: { ref: requiredArg(args, 0, 'ref') } };
+    case 'dblclick-xy':
+    case 'double-click-xy':
+      return { method: 'dblclick_xy', params: { x: requiredArg(args, 0, 'x'), y: requiredArg(args, 1, 'y') } };
+    case 'right-click':
+    case 'context-click':
+      return { method: 'right_click', params: { ref: requiredArg(args, 0, 'ref') } };
+    case 'right-click-xy':
+    case 'context-click-xy':
+      return { method: 'right_click_xy', params: { x: requiredArg(args, 0, 'x'), y: requiredArg(args, 1, 'y') } };
+    case 'type':
+    case 'fill': {
       const submit = args.includes('--submit');
       const rest = args.filter((arg) => arg !== '--submit');
       const ref = requiredArg(rest, 0, 'ref');
       const text = rest.slice(1).join(' ');
-      if (!text) throw new Error('type needs the text to insert');
-      return { method: 'type', params: { ref, text, submit } };
+      if (!text) throw new Error(`${command} needs the text to insert`);
+      return { method: command === 'fill' ? 'fill' : 'type', params: { ref, text, submit } };
+    }
+    case 'clear':
+      return { method: 'clear', params: { ref: requiredArg(args, 0, 'ref') } };
+    case 'select': {
+      const ref = requiredArg(args, 0, 'ref');
+      const value = args.slice(1).join(' ').trim();
+      if (!value) throw new Error('select needs a value or label');
+      return { method: 'select', params: { ref, value } };
     }
     case 'press': {
       const key = args.join('+');
@@ -215,6 +240,8 @@ function commandCall(command: string, args: string[]): { method: string; params:
     }
     case 'wait':
       return { method: 'wait', params: { ms: requiredArg(args, 0, 'milliseconds') } };
+    case 'wait-for':
+      return waitForCall(args);
     case 'click-xy':
       return { method: 'click_xy', params: { x: requiredArg(args, 0, 'x'), y: requiredArg(args, 1, 'y') } };
     case 'locate': {
@@ -245,6 +272,50 @@ function commandCall(command: string, args: string[]): { method: string; params:
     default:
       throw new Error(`unknown command: ${command}\n\n${HELP}`);
   }
+}
+
+function waitForCall(args: string[]): { method: string; params: Record<string, unknown> } {
+  const { timeout, rest } = takeTimeoutFlag(args);
+  const kind = requiredArg(rest, 0, 'text, url, or idle');
+  const params: Record<string, unknown> = {};
+  if (timeout != null) params.timeout = timeout;
+  if (kind === 'text') {
+    const text = rest.slice(1).join(' ');
+    if (!text) throw new Error('wait-for text needs a substring');
+    return { method: 'wait_for_text', params: { ...params, text } };
+  }
+  if (kind === 'url') {
+    const url = rest.slice(1).join(' ');
+    if (!url) throw new Error('wait-for url needs a substring or /pattern/');
+    return { method: 'wait_for_url', params: { ...params, url } };
+  }
+  if (kind === 'idle') {
+    if (rest.length > 1) throw new Error('wait-for idle only accepts --timeout');
+    return { method: 'wait_for_idle', params };
+  }
+  throw new Error('wait-for needs text, url, or idle');
+}
+
+function takeTimeoutFlag(args: string[]): { timeout?: string; rest: string[] } {
+  const rest: string[] = [];
+  let timeout: string | undefined;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === '--timeout') {
+      const value = args[index + 1];
+      if (!value) throw new Error('--timeout needs milliseconds');
+      timeout = value;
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith('--timeout=')) {
+      timeout = arg.slice('--timeout='.length);
+      if (!timeout) throw new Error('--timeout needs milliseconds');
+      continue;
+    }
+    rest.push(arg);
+  }
+  return { timeout, rest };
 }
 
 function logArgs(args: string[]): Record<string, unknown> {
@@ -313,6 +384,9 @@ function takeFlags(argv: string[]): { port?: number; cdp?: string; requireTruste
 
 function clientTimeout(method: string, params: Record<string, unknown>): number {
   if (method === 'wait') return Number(params.ms) + 15000;
+  if (method === 'wait_for_text' || method === 'wait_for_url' || method === 'wait_for_idle') {
+    return Number(params.timeout ?? 10000) + 15000;
+  }
   if (method === 'navigate') return 45000;
   return 30000;
 }
@@ -332,8 +406,17 @@ Usage:
   agent-hand snapshot
   agent-hand click <ref>
   agent-hand click-xy <x> <y>                 CSS px, same space as snapshot boxes
+  agent-hand hover <ref>
+  agent-hand hover-xy <x> <y>
+  agent-hand dblclick <ref>                   also: double-click
+  agent-hand dblclick-xy <x> <y>              also: double-click-xy
+  agent-hand right-click <ref>                also: context-click
+  agent-hand right-click-xy <x> <y>           also: context-click-xy
   agent-hand locate <text>
-  agent-hand type <ref> <text> [--submit]
+  agent-hand type <ref> <text> [--submit]     appends; does not clear
+  agent-hand clear <ref>
+  agent-hand fill <ref> <text> [--submit]     clear, then insert
+  agent-hand select <ref> <value|label>
   agent-hand press <key>
   agent-hand scroll <up|down|left|right|ref> [amount]
   agent-hand emulate <iphone|pixel|off|390x844|390x844@3|width height [dpr]> [--fit-window]
@@ -343,11 +426,18 @@ Usage:
   agent-hand network-errors [--clear] [--max <n>]
   agent-hand reload-extension
   agent-hand wait <ms>
+  agent-hand wait-for text <substring> [--timeout <ms>]
+  agent-hand wait-for url <substring|/pattern/> [--timeout <ms>]
+  agent-hand wait-for idle [--timeout <ms>]
 
---require-trusted    fail click, type, press, scroll, and click-xy instead of
-                     sending a synthetic event. Also set by
+--require-trusted    fail click, hover, dblclick, right-click, type, clear,
+                     fill, press, scroll, select, and the xy variants instead
+                     of sending a synthetic event. A native select has no
+                     trusted popup, so it fails under this flag. Also set by
                      AGENT_HAND_REQUIRE_TRUSTED=1 or "requireTrusted": true
                      in the config file. Default is the synthetic fallback.
+                     wait-for idle defaults to 10000ms and treats idle as
+                     500ms with no tracked network request in flight.
 
 The bridge listens on 127.0.0.1 only. On first run it writes a token to
 ~/.agent-hand/config.json. Paste that token into the extension options page.

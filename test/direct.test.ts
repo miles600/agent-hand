@@ -37,6 +37,28 @@ test('direct CDP session falls back without closing the app', async () => {
       assert.equal(typed.via, 'synthetic');
       assert.equal(mock.seen.includes('Input.insertText'), false);
       assert.ok(mock.expressions.some((expression) => expression.includes('api["setValue"]')));
+      const saveRef = snap.items.find((item) => item.name === 'Save')?.ref;
+      const nameRefEarly = snap.items.find((item) => item.name === 'Name')?.ref;
+      const hovered = await session.call('hover', { ref: saveRef, duration: 0 }) as { via: string };
+      assert.equal(hovered.via, 'synthetic');
+      assert.ok(mock.expressions.some((expression) => expression.includes('api["syntheticHover"]')));
+      const doubled = await session.call('dblclick', { ref: saveRef, duration: 0 }) as { via: string };
+      assert.equal(doubled.via, 'synthetic');
+      const right = await session.call('right_click', { ref: saveRef, duration: 0 }) as { via: string };
+      assert.equal(right.via, 'synthetic');
+      const filled = await session.call('fill', { ref: nameRefEarly, text: 'Paris', duration: 0 }) as { via: string };
+      assert.equal(filled.via, 'synthetic');
+      const cleared = await session.call('clear', { ref: nameRefEarly, duration: 0 }) as { via: string; cleared: boolean };
+      assert.equal(cleared.via, 'synthetic');
+      assert.equal(cleared.cleared, true);
+      const chosen = await session.call('select', { ref: saveRef, value: 'Green' }) as { via: string; kind: string; label: string };
+      assert.equal(chosen.kind, 'native');
+      assert.equal(chosen.via, 'synthetic');
+      assert.equal(chosen.label, 'Green');
+      await assert.rejects(
+        () => session.call('wait_for_text', { text: 'missing-text', timeout: 0 }),
+        /timed out after 0ms waiting for visible text/,
+      );
       const pressed = await session.call('press', { key: 'Enter' }) as { via: string; warning?: string };
       assert.equal(pressed.via, 'synthetic');
       assert.match(pressed.warning ?? '', /DevTools/);
@@ -64,7 +86,18 @@ test('direct CDP session falls back without closing the app', async () => {
         () => session.call('press', { key: 'Enter', requireTrusted: true }),
         /Trusted input required[\s\S]*DevTools/,
       );
+      const syntheticHovers = () => mock.expressions.filter((expression) => expression.includes('syntheticHover')).length;
+      const beforeHover = syntheticHovers();
+      await assert.rejects(
+        () => session.call('hover', { ref: saveRef, duration: 0, requireTrusted: true }),
+        /Trusted input required[\s\S]*Synthetic input was not sent/,
+      );
+      await assert.rejects(
+        () => session.call('select', { ref: saveRef, value: 'Green', requireTrusted: true }),
+        /native select/,
+      );
       assert.equal(syntheticClicks(), beforeTrusted);
+      assert.equal(syntheticHovers(), beforeHover);
       const emulated = await session.call('emulate', { preset: 'iphone' }) as {
         width: number;
         touch: boolean;
@@ -123,8 +156,21 @@ test('bridge routes page commands to CDP and then back to the extension', async 
     const health = await (await fetch(`http://127.0.0.1:${server.port}/health`)).json() as { mode: string; cdp: string };
     assert.equal(health.mode, 'cdp');
     assert.equal(health.cdp, mock.origin);
-    const snap = await client.call('snapshot', {}) as { text: string };
+    const snap = await client.call('snapshot', {}) as { text: string; items: { ref: number; name: string }[] };
     assert.match(snap.text, /\[1\]/);
+    const save = snap.items.find((item) => item.name === 'Save');
+    const name = snap.items.find((item) => item.name === 'Name');
+    const hovered = await client.call('hover', { ref: save?.ref, duration: 0 }) as { via: string };
+    assert.equal(hovered.via, 'trusted');
+    const filled = await client.call('fill', { ref: name?.ref, text: 'Paris', duration: 0 }) as { via: string };
+    assert.equal(filled.via, 'trusted');
+    assert.ok(mock.seen.includes('Input.insertText'));
+    assert.ok(mock.seen.includes('Input.dispatchKeyEvent'));
+    const found = await client.call('wait_for_text', { text: 'hello', timeout: 200 }) as { found: boolean };
+    assert.equal(found.found, true);
+    const idle = await client.call('wait_for_idle', { timeout: 2000 }) as { idle: boolean; via: string };
+    assert.equal(idle.idle, true);
+    assert.equal(idle.via, 'network');
     const shot = await client.call('screenshot', {}) as { path: string; base64?: string };
     assert.equal(shot.base64, undefined);
     assert.match(shot.path, /\.png$/);
@@ -287,7 +333,11 @@ function evalMock(expression: string): unknown {
   if (method === 'pageInfo') return { href: 'app://./index.html', title: 'Electron' };
   if (method === 'text') return 'hello page';
   if (method === 'setValue') return true;
+  if (method === 'selectOption') return { action: 'native', value: 'green', label: 'Green' };
   if (method === 'syntheticClick') return { tag: 'uni-button', text: 'OK' };
+  if (method === 'syntheticHover') return { tag: 'button', text: 'Hover' };
+  if (method === 'syntheticDblclick') return { tag: 'button', text: 'Double' };
+  if (method === 'syntheticRightClick') return { tag: 'button', text: 'Menu' };
   if (method === 'syntheticKey') return { acted: true };
   if (method === 'syntheticScroll') return true;
   if (method === 'locate') return [{ text: 'OK', tag: 'uni-button', x: 10, y: 20, width: 40, height: 20 }];

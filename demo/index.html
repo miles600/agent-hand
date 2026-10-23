@@ -15,7 +15,7 @@
       main { max-width: 720px; margin: 0 auto; padding: 28px 20px 80px; }
       h1 { font-size: 28px; margin: 0 0 8px; }
       p { margin: 0 0 12px; }
-      button, input {
+      button, input, select {
         font: inherit;
         color: inherit;
       }
@@ -34,13 +34,24 @@
         font-size: 18px;
         box-shadow: none;
       }
-      input {
+      input, select, [contenteditable] {
         padding: 10px 12px;
         border-radius: 8px;
         border: 1px solid #d6d3d1;
         background: #fff;
         min-width: 220px;
       }
+      [contenteditable] { min-height: 40px; }
+      [role="listbox"] {
+        list-style: none;
+        margin: 8px 0 12px;
+        padding: 4px;
+        width: 180px;
+        background: #fff;
+        border: 1px solid #d6d3d1;
+        border-radius: 8px;
+      }
+      [role="option"] { padding: 6px 8px; cursor: pointer; }
       form { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; margin: 8px 0 12px; }
       label { display: block; font-weight: 650; margin-bottom: 6px; }
       iframe { width: 100%; height: 132px; border: 1px solid #d6d3d1; border-radius: 10px; background: #e7eef8; }
@@ -65,6 +76,40 @@
         <button type="submit">Save name</button>
       </form>
       <p id="hello">No name yet</p>
+      <p><button id="hover" type="button">Hover target</button></p>
+      <p id="hover-state">Hover: none</p>
+      <p><button id="dbl" type="button">Double click</button></p>
+      <p id="dbl-state">Double: none</p>
+      <p><button id="menu" type="button">Right click</button></p>
+      <p id="menu-state">Context: none</p>
+      <div>
+        <label for="city">City</label>
+        <input id="city" name="city" autocomplete="off" value="Old city" />
+      </div>
+      <p id="city-state">City: Old city</p>
+      <div>
+        <label for="note">Note</label>
+        <div id="note" contenteditable="true" role="textbox" aria-label="Note">Old note</div>
+      </div>
+      <p id="note-state">Note: Old note</p>
+      <div>
+        <label for="color">Color</label>
+        <select id="color">
+          <option value="red">Red</option>
+          <option value="green">Green</option>
+          <option value="blue">Blue</option>
+        </select>
+      </div>
+      <p id="color-state">Color: red</p>
+      <p><button id="pet" type="button" role="combobox" aria-haspopup="listbox" aria-expanded="false" aria-controls="pet-list">Pet</button></p>
+      <ul id="pet-list" role="listbox" hidden>
+        <li role="option" data-value="cat">Cat</li>
+        <li role="option" data-value="dog">Dog</li>
+      </ul>
+      <p id="pet-state">Pet: none</p>
+      <p><button id="show-later" type="button">Show later</button></p>
+      <p id="later"></p>
+      <p><button id="mark-url" type="button">Mark url</button></p>
       <iframe title="Inner page" src="/demo/iframe.html"></iframe>
       <div class="spacer"></div>
       <p><button id="buried" type="button">Buried button</button></p>
@@ -93,6 +138,54 @@
         const value = document.getElementById('name').value;
         const trust = event.isTrusted ? 'trusted' : 'untrusted';
         document.getElementById('hello').textContent = 'Hello, ' + value + ' (' + trust + ' submit)';
+      });
+      const city = document.getElementById('city');
+      let cityModel = city.value;
+      city.addEventListener('input', () => {
+        cityModel = city.value;
+        document.getElementById('city-state').textContent = 'City: ' + cityModel;
+      });
+      const note = document.getElementById('note');
+      note.addEventListener('input', () => {
+        document.getElementById('note-state').textContent = 'Note: ' + note.innerText.replace(/\s+/g, ' ').trim();
+      });
+      document.getElementById('hover').addEventListener('mouseover', (event) => {
+        document.getElementById('hover-state').textContent = event.isTrusted ? 'Hover: trusted' : 'Hover: synthetic';
+      });
+      document.getElementById('dbl').addEventListener('dblclick', (event) => {
+        document.getElementById('dbl-state').textContent = event.isTrusted ? 'Double: trusted' : 'Double: synthetic';
+      });
+      document.getElementById('menu').addEventListener('contextmenu', (event) => {
+        event.preventDefault();
+        document.getElementById('menu-state').textContent = event.isTrusted ? 'Context: trusted' : 'Context: synthetic';
+      });
+      document.getElementById('color').addEventListener('change', (event) => {
+        document.getElementById('color-state').textContent = 'Color: ' + event.target.value;
+      });
+      const pet = document.getElementById('pet');
+      const petList = document.getElementById('pet-list');
+      pet.addEventListener('click', () => {
+        const open = petList.hasAttribute('hidden');
+        if (open) petList.removeAttribute('hidden');
+        else petList.setAttribute('hidden', '');
+        pet.setAttribute('aria-expanded', open ? 'true' : 'false');
+      });
+      petList.addEventListener('click', (event) => {
+        const option = event.target.closest('[role="option"]');
+        if (!option) return;
+        document.getElementById('pet-state').textContent = 'Pet: ' + option.textContent.trim();
+        petList.setAttribute('hidden', '');
+        pet.setAttribute('aria-expanded', 'false');
+      });
+      document.getElementById('show-later').addEventListener('click', () => {
+        setTimeout(() => {
+          document.getElementById('later').textContent = 'Status: ready';
+        }, 350);
+      });
+      document.getElementById('mark-url').addEventListener('click', () => {
+        setTimeout(() => {
+          location.hash = 'ready';
+        }, 300);
       });
       let buried = 0;
       document.getElementById('buried').addEventListener('click', (event) => {

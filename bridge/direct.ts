@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { CdpConnection, fetchCdpTargets, type CdpTarget } from './cdp.js';
+import { nativeSelectTrustedError, readSelectPlan, type SelectPlan } from '../shared/actions.js';
 import { normalizeCdpUrl } from '../shared/cdp-url.js';
 import { matchFrameRect, type FrameRect } from '../shared/frames.js';
 import { applyEmulation, resolveEmulation, viewportMatches, wantsFitWindow, type EmulationSpec } from '../shared/emulate.js';
@@ -14,12 +15,17 @@ import {
 import { parseKeyCombo, type KeyDispatch } from '../shared/keys.js';
 import {
   consoleFromCdp,
+  createInflight,
+  inflightQuiet,
   mergeConsole,
   networkFromCdp,
   pushCapped,
+  trackInflight,
   type ConsoleMessage,
+  type Inflight,
   type NetworkError,
 } from '../shared/monitor.js';
+import { dispatchPointer, pointerLabel, type PointerKind } from '../shared/pointer.js';
 import { DEFAULT_CURSOR_MS } from '../shared/protocol.js';
 import {
   nextScreenshotScale,
@@ -28,6 +34,14 @@ import {
   viewportScreenshotParams,
 } from '../shared/screenshot.js';
 import { sleep } from '../shared/sleep.js';
+import {
+  NETWORK_IDLE_QUIET_MS,
+  networkIdleTimeout,
+  pollUntil,
+  textTimeout,
+  urlMatches,
+  urlTimeout,
+} from '../shared/wait.js';
 import { buildSnapshot, type RawElement } from '../shared/snapshot.js';
 
 type Ctx = { id: number; frameId: string; url: string };
@@ -63,6 +77,7 @@ export class DirectSession {
   private consoleLog: ConsoleMessage[] = [];
   private networkLog: NetworkError[] = [];
   private requestUrls = new Map<string, string>();
+  private inflight: Inflight = createInflight();
   private touch = false;
   private emulation: EmulationSpec | null = null;
   private scriptArmed = false;
@@ -123,8 +138,20 @@ export class DirectSession {
         return this.snapshot();
       case 'click':
         return this.click(params);
+      case 'hover':
+        return this.pointer(params, 'hover', 'ref');
+      case 'dblclick':
+        return this.pointer(params, 'double', 'ref');
+      case 'right_click':
+        return this.pointer(params, 'right', 'ref');
       case 'type':
         return this.typeText(params);
+      case 'clear':
+        return this.fillText(params, 'clear');
+      case 'fill':
+        return this.fillText(params, 'fill');
+      case 'select':
+        return this.chooseOption(params);
       case 'press':
         return this.press(String(params.key ?? ''), requiresTrustedInput(params));
       case 'scroll':
@@ -135,6 +162,12 @@ export class DirectSession {
         return this.getText(typeof params.max === 'number' ? params.max : 8000);
       case 'click_xy':
         return this.clickXY(params);
+      case 'hover_xy':
+        return this.pointer(params, 'hover', 'xy');
+      case 'dblclick_xy':
+        return this.pointer(params, 'double', 'xy');
+      case 'right_click_xy':
+        return this.pointer(params, 'right', 'xy');
       case 'locate':
         return this.locate(String(params.text ?? ''));
       case 'emulate':
@@ -143,6 +176,12 @@ export class DirectSession {
         return this.readConsole(params);
       case 'network_errors':
         return this.readNetwork(params);
+      case 'wait_for_text':
+        return this.waitForText(params);
+      case 'wait_for_url':
+        return this.waitForUrl(params);
+      case 'wait_for_idle':
+        return this.waitForIdle(params);
       default:
         throw new Error(`unknown method: ${method}`);
     }
@@ -171,6 +210,7 @@ export class DirectSession {
     this.contexts.clear();
     this.installed.clear();
     this.refs.clear();
+    this.inflight = createInflight();
     this.frames = [];
     this.frameNumbers.clear();
     this.scriptArmed = false;
@@ -225,10 +265,18 @@ export class DirectSession {
     });
     page.on('Network.requestWillBeSent', (params) => {
       networkFromCdp('Network.requestWillBeSent', params, this.requestUrls);
+      trackInflight(this.inflight, 'Network.requestWillBeSent', params);
     });
     page.on('Network.loadingFailed', (params) => {
       const failure = networkFromCdp('Network.loadingFailed', params, this.requestUrls);
       if (failure) pushCapped(this.networkLog, failure);
+      trackInflight(this.inflight, 'Network.loadingFailed', params);
+    });
+    page.on('Network.loadingFinished', (params) => {
+      trackInflight(this.inflight, 'Network.loadingFinished', params);
+    });
+    page.on('Network.requestServedFromCache', (params) => {
+      trackInflight(this.inflight, 'Network.requestServedFromCache', params);
     });
     page.on('Network.responseReceived', (params) => {
       const failure = networkFromCdp('Network.responseReceived', params, this.requestUrls);
@@ -242,6 +290,7 @@ export class DirectSession {
     await page.send('Page.navigate', { url });
     await loaded;
     this.installed.clear();
+    this.inflight = createInflight();
     await this.holdEmulation();
     const info = await this.pageInfo();
     return { url: info.href || url, title: info.title, mode: 'cdp' };
@@ -380,6 +429,178 @@ export class DirectSession {
       clickVia: clicked.via,
       mode: 'cdp',
     };
+  }
+
+  private async fillText(params: Record<string, unknown>, mode: 'fill' | 'clear'): Promise<unknown> {
+    const ref = requiredInt(params.ref, 'ref');
+    const text = mode === 'clear' ? '' : (typeof params.text === 'string' ? params.text : '');
+    const entry = this.refEntry(ref);
+    const at = await this.reveal(entry);
+    await this.cursor(at.x, at.y, mode === 'clear' ? 'Clear' : 'Fill', durationOf(params));
+    await this.ripple();
+    const requireTrusted = requiresTrustedInput(params);
+    const clicked = await this.clickAt(at.x, at.y, entry.contextId, at.localX, at.localY, requireTrusted);
+    await this.callApi(entry.contextId, 'focus', [entry.ahId]);
+    await sleep(40);
+    let via: Via = 'trusted';
+    let warning = clicked.warning;
+    const writeSynthetic = async () => {
+      await this.setFieldValue(entry, text);
+    };
+    if (clicked.via !== 'trusted') {
+      via = 'synthetic';
+      await writeSynthetic();
+    } else {
+      const selected = await this.callApi<boolean>(entry.contextId, 'selectContents', [entry.ahId]);
+      if (!selected) {
+        if (requireTrusted) throw new Error('clear and fill need an input, textarea, or contenteditable');
+        via = 'synthetic';
+        warning = warning ?? 'The field contents could not be selected, so the value was set in the page.';
+        await writeSynthetic();
+      } else {
+        try {
+          await this.keyDownUp(parseKeyCombo('Backspace'));
+          if (text) await this.input('Input.insertText', { text });
+        } catch (error) {
+          if (!isInputFallbackError(error)) throw error;
+          const reason = error instanceof Error ? error.message : String(error);
+          if (requireTrusted) throw trustedInputRequiredError(reason);
+          via = 'synthetic';
+          warning = syntheticInputWarning(reason);
+          await writeSynthetic();
+        }
+      }
+    }
+    if (mode === 'fill' && params.submit === true) {
+      await this.label('Submit');
+      const enter = parseKeyCombo('Enter');
+      if (via === 'trusted') {
+        try {
+          await this.keyDownUp(enter);
+        } catch (error) {
+          if (!isInputFallbackError(error)) throw error;
+          const reason = error instanceof Error ? error.message : String(error);
+          if (requireTrusted) throw trustedInputRequiredError(reason);
+          warning = syntheticInputWarning(reason);
+          await this.syntheticKey(enter);
+        }
+      } else if (!requireTrusted) {
+        await this.syntheticKey(enter);
+      } else {
+        throw trustedInputRequiredError(warning || 'click was not trusted');
+      }
+    }
+    return {
+      ...(warning ? { warning } : {}),
+      ref,
+      length: text.length,
+      ...(mode === 'clear' ? { cleared: true } : { submitted: params.submit === true }),
+      via,
+      clickVia: clicked.via,
+      mode: 'cdp',
+    };
+  }
+
+  private async chooseOption(params: Record<string, unknown>): Promise<unknown> {
+    const ref = requiredInt(params.ref, 'ref');
+    const value = typeof params.value === 'string' ? params.value : '';
+    const requireTrusted = requiresTrustedInput(params);
+    const entry = this.refEntry(ref);
+    const at = await this.reveal(entry);
+    await this.cursor(at.x, at.y, 'Select', durationOf(params));
+    const originX = at.x - at.localX;
+    const originY = at.y - at.localY;
+    let opened = false;
+    for (let round = 0; round < 2; round += 1) {
+      const plan: SelectPlan = readSelectPlan(await this.callApi(entry.contextId, 'selectOption', [entry.ahId, value, opened, !requireTrusted]));
+      if (plan.action === 'error') throw new Error(plan.error || 'select failed');
+      if (plan.action === 'native') {
+        if (requireTrusted) throw nativeSelectTrustedError();
+        return { ref, via: 'synthetic', kind: 'native', value: plan.value, label: plan.label, mode: 'cdp' };
+      }
+      if (plan.action === 'open') {
+        if (round === 1) throw new Error('option list did not open');
+        await this.ripple();
+        await this.clickAt(at.x, at.y, entry.contextId, at.localX, at.localY, requireTrusted);
+        opened = true;
+        await sleep(200);
+        continue;
+      }
+      const localX = typeof plan.x === 'number' ? plan.x : at.localX;
+      const localY = typeof plan.y === 'number' ? plan.y : at.localY;
+      const x = localX + originX;
+      const y = localY + originY;
+      await this.cursor(x, y, 'Choose', durationOf(params));
+      await this.ripple();
+      const delivered = await this.clickAt(x, y, entry.contextId, localX, localY, requireTrusted);
+      return {
+        ...(delivered.warning ? { warning: delivered.warning } : {}),
+        ref,
+        via: delivered.via,
+        kind: 'click',
+        value,
+        label: plan.label,
+        x,
+        y,
+        mode: 'cdp',
+      };
+    }
+    throw new Error('select failed');
+  }
+
+  private async waitForText(params: Record<string, unknown>): Promise<unknown> {
+    await this.requirePage();
+    const text = typeof params.text === 'string' ? params.text : '';
+    const timeout = timeoutOf(params);
+    let last = '';
+    const waited = await pollUntil(timeout, 200, async () => {
+      last = await this.visibleText();
+      return last.includes(text);
+    });
+    if (waited < 0) throw textTimeout(timeout, text);
+    return { found: true, waited, mode: 'cdp' };
+  }
+
+  private async waitForUrl(params: Record<string, unknown>): Promise<unknown> {
+    await this.requirePage();
+    const pattern = typeof params.url === 'string' ? params.url : '';
+    const timeout = timeoutOf(params);
+    let href = '';
+    const waited = await pollUntil(timeout, 200, async () => {
+      const info = await this.pageInfo();
+      href = info.href;
+      return urlMatches(href, pattern);
+    });
+    if (waited < 0) throw urlTimeout(timeout, pattern, href);
+    return { url: href, waited, mode: 'cdp' };
+  }
+
+  private async waitForIdle(params: Record<string, unknown>): Promise<unknown> {
+    await this.requirePage();
+    const timeout = timeoutOf(params);
+    const started = Date.now();
+    const deadline = started + timeout;
+    while (true) {
+      const now = Date.now();
+      if (inflightQuiet(this.inflight, NETWORK_IDLE_QUIET_MS, now)) {
+        return { idle: true, via: 'network', waited: now - started, quietMs: NETWORK_IDLE_QUIET_MS, inflight: 0, mode: 'cdp' };
+      }
+      if (now >= deadline) throw networkIdleTimeout(timeout, this.inflight.ids.size);
+      await sleep(Math.min(100, deadline - now));
+    }
+  }
+
+  private async visibleText(): Promise<string> {
+    const parts: string[] = [];
+    for (const ctx of this.defaultContexts()) {
+      try {
+        const value = await this.callApi<string>(ctx.id, 'text', []);
+        if (value) parts.push(value);
+      } catch {
+        // skip frames that cannot answer
+      }
+    }
+    return parts.join('\n\n');
   }
 
   private async press(key: string, requireTrusted = false): Promise<unknown> {
@@ -650,6 +871,37 @@ export class DirectSession {
     return map;
   }
 
+  private async pointer(params: Record<string, unknown>, kind: PointerKind, target: 'ref' | 'xy'): Promise<unknown> {
+    if (target === 'xy') {
+      const x = Number(params.x);
+      const y = Number(params.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error('x and y are required');
+      const page = await this.requirePage();
+      await page.send('Page.bringToFront').catch(() => undefined);
+      const main = this.mainContext();
+      if (!main) throw new Error('page script is not available on this target');
+      await this.cursor(x, y, pointerLabel(kind), durationOf(params));
+      if (kind !== 'hover') await this.ripple();
+      const delivered = await this.pointerAt(x, y, main.id, x, y, kind, requiresTrustedInput(params));
+      return { ...(delivered.warning ? { warning: delivered.warning } : {}), x, y, via: delivered.via, mode: 'cdp' };
+    }
+    const ref = requiredInt(params.ref, 'ref');
+    const entry = this.refEntry(ref);
+    const at = await this.reveal(entry);
+    await this.cursor(at.x, at.y, pointerLabel(kind), durationOf(params));
+    if (kind !== 'hover') await this.ripple();
+    const delivered = await this.pointerAt(at.x, at.y, entry.contextId, at.localX, at.localY, kind, requiresTrustedInput(params));
+    return {
+      ...(delivered.warning ? { warning: delivered.warning } : {}),
+      ref,
+      via: delivered.via,
+      x: at.x,
+      y: at.y,
+      devicePixelRatio: at.devicePixelRatio,
+      mode: 'cdp',
+    };
+  }
+
   private async clickAt(
     x: number,
     y: number,
@@ -658,42 +910,38 @@ export class DirectSession {
     localY: number,
     requireTrusted = false,
   ): Promise<{ via: Via; warning?: string }> {
+    return this.pointerAt(x, y, contextId, localX, localY, 'click', requireTrusted);
+  }
+
+  private async pointerAt(
+    x: number,
+    y: number,
+    contextId: number,
+    localX: number,
+    localY: number,
+    kind: PointerKind,
+    requireTrusted: boolean,
+  ): Promise<{ via: Via; warning?: string }> {
     try {
-      await this.callApi(contextId, 'armClick', [localX, localY]).catch(() => undefined);
-      await this.mouseClick(x, y);
+      if (kind !== 'hover') {
+        await this.callApi(contextId, 'armClick', [localX, localY]).catch(() => undefined);
+      }
+      await this.sendPointer(x, y, kind);
       return { via: 'trusted' };
     } catch (error) {
       if (!isInputFallbackError(error)) throw error;
       const reason = error instanceof Error ? error.message : String(error);
       if (requireTrusted) throw trustedInputRequiredError(reason);
-      await this.callApi(contextId, 'syntheticClick', [localX, localY, this.touch ? 'touch' : 'mouse']);
+      const pointerType = kind === 'click' || kind === 'double' ? (this.touch ? 'touch' : 'mouse') : 'mouse';
+      await this.callApi(contextId, syntheticPointerApi(kind), [localX, localY, pointerType]);
       return { via: 'synthetic', warning: syntheticInputWarning(reason) };
     }
   }
 
-  private async mouseClick(x: number, y: number): Promise<void> {
-    const px = Math.round(x * 100) / 100;
-    const py = Math.round(y * 100) / 100;
-    await this.input('Input.dispatchMouseEvent', { type: 'mouseMoved', x: px, y: py, button: 'none', pointerType: 'mouse' });
-    await this.input('Input.dispatchMouseEvent', {
-      type: 'mousePressed',
-      x: px,
-      y: py,
-      button: 'left',
-      buttons: 1,
-      clickCount: 1,
-      pointerType: 'mouse',
-    });
-    await sleep(30);
-    await this.input('Input.dispatchMouseEvent', {
-      type: 'mouseReleased',
-      x: px,
-      y: py,
-      button: 'left',
-      buttons: 0,
-      clickCount: 1,
-      pointerType: 'mouse',
-    });
+  private async sendPointer(x: number, y: number, kind: PointerKind): Promise<void> {
+    await dispatchPointer(x, y, kind, async (event) => {
+      await this.input('Input.dispatchMouseEvent', event as unknown as Record<string, unknown>);
+    }, sleep);
   }
 
   private async keyDownUp(key: KeyDispatch): Promise<void> {
@@ -909,6 +1157,17 @@ function wheelDelta(direction: string, amount: number): { x: number; y: number }
   if (direction === 'left') return { x: -amount, y: 0 };
   if (direction === 'right') return { x: amount, y: 0 };
   throw new Error('direction must be up, down, left, or right');
+}
+
+function syntheticPointerApi(kind: PointerKind): string {
+  if (kind === 'hover') return 'syntheticHover';
+  if (kind === 'double') return 'syntheticDblclick';
+  if (kind === 'right') return 'syntheticRightClick';
+  return 'syntheticClick';
+}
+
+function timeoutOf(params: Record<string, unknown>): number {
+  return typeof params.timeout === 'number' ? params.timeout : 10000;
 }
 
 function durationOf(params: Record<string, unknown>): number {

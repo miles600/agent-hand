@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { consoleFromCdp, mergeConsole, networkFromCdp } from '../shared/monitor.js';
+import { consoleFromCdp, createInflight, inflightQuiet, mergeConsole, networkFromCdp, trackInflight } from '../shared/monitor.js';
 
 test('console and network events become report rows', () => {
   const requests = new Map<string, string>();
@@ -33,6 +33,18 @@ test('console and network events become report rows', () => {
   }, 7);
   assert.equal(logged?.level, 'warn');
   assert.equal(logged?.text, 'from cdp');
+
+  const inflight = createInflight(1);
+  assert.equal(inflightQuiet(inflight, 500, 501), true);
+  trackInflight(inflight, 'Network.requestWillBeSent', { requestId: 'r1' }, 10);
+  assert.equal(inflight.ids.size, 1);
+  assert.equal(inflightQuiet(inflight, 500, 20), false);
+  trackInflight(inflight, 'Network.responseReceived', { requestId: 'r1' }, 20);
+  assert.equal(inflight.ids.size, 1);
+  trackInflight(inflight, 'Network.loadingFinished', { requestId: 'r1' }, 30);
+  assert.equal(inflight.ids.size, 0);
+  assert.equal(inflightQuiet(inflight, 500, 30), false);
+  assert.equal(inflightQuiet(inflight, 500, 530), true);
   const merged = mergeConsole([
     { level: 'warn', text: 'from cdp', time: 7, source: 'cdp' },
     { level: 'warn', text: 'from cdp', time: 8, source: 'page' },

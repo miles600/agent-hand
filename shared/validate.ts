@@ -2,6 +2,7 @@ import { normalizeCdpUrl } from './cdp-url.js';
 import { normalizeEmulate } from './emulate.js';
 import { requiresTrustedInput } from './input.js';
 import { parseKeyCombo } from './keys.js';
+import { compileUrlPattern, DEFAULT_WAIT_TIMEOUT_MS, MAX_WAIT_TIMEOUT_MS } from './wait.js';
 
 const DIRECTIONS = new Set(['up', 'down', 'left', 'right']);
 
@@ -19,8 +20,12 @@ export function normalizeCall(
     case 'navigate':
       return { method, params: { url: asHttpUrl(input.url) } };
     case 'click':
-      return { method, params: withTrusted(withMotion({ ref: asRef(input.ref) }, input), input) };
-    case 'type': {
+    case 'hover':
+    case 'dblclick':
+    case 'right_click':
+      return refPoint(method, input);
+    case 'type':
+    case 'fill': {
       const text = asString(input.text, 'text');
       if (text.length === 0) throw new Error('text is required');
       if (text.length > 20000) throw new Error('text is too long');
@@ -28,6 +33,14 @@ export function normalizeCall(
         method,
         params: withTrusted(withMotion({ ref: asRef(input.ref), text, submit: Boolean(input.submit) }, input), input),
       };
+    }
+    case 'clear':
+      return refPoint(method, input);
+    case 'select': {
+      const value = asString(input.value, 'value').trim();
+      if (!value) throw new Error('value is required');
+      if (value.length > 500) throw new Error('value is too long');
+      return { method, params: withTrusted(withMotion({ ref: asRef(input.ref), value }, input), input) };
     }
     case 'press': {
       const key = asString(input.key, 'key');
@@ -61,12 +74,11 @@ export function normalizeCall(
       if (input.out != null) params.out = asString(input.out, 'out');
       return { method, params };
     }
-    case 'click_xy': {
-      const x = asFinite(input.x, 'x');
-      const y = asFinite(input.y, 'y');
-      if (x < 0 || y < 0 || x > 100000 || y > 100000) throw new Error('click_xy needs viewport CSS pixels');
-      return { method, params: withTrusted(withMotion({ x, y }, input), input) };
-    }
+    case 'click_xy':
+    case 'hover_xy':
+    case 'dblclick_xy':
+    case 'right_click_xy':
+      return xyPoint(method, input);
     case 'locate': {
       const text = asString(input.text, 'text');
       if (!text.trim()) throw new Error('text is required');
@@ -93,9 +105,41 @@ export function normalizeCall(
       if (ms < 0 || ms > 60000) throw new Error('ms out of range');
       return { method, params: { ms } };
     }
+    case 'wait_for_text': {
+      const text = asString(input.text, 'text');
+      if (!text) throw new Error('text is required');
+      if (text.length > 500) throw new Error('text is too long');
+      return { method, params: { text, ...timeoutParam(input) } };
+    }
+    case 'wait_for_url': {
+      const url = asString(input.url, 'url');
+      if (!url.trim()) throw new Error('url is required');
+      if (url.length > 500) throw new Error('url is too long');
+      compileUrlPattern(url);
+      return { method, params: { url, ...timeoutParam(input) } };
+    }
+    case 'wait_for_idle':
+      return { method, params: timeoutParam(input) };
     default:
       throw new Error(`unknown method: ${method}`);
   }
+}
+
+function refPoint(method: string, input: Record<string, unknown>): { method: string; params: Record<string, unknown> } {
+  return { method, params: withTrusted(withMotion({ ref: asRef(input.ref) }, input), input) };
+}
+
+function xyPoint(method: string, input: Record<string, unknown>): { method: string; params: Record<string, unknown> } {
+  const x = asFinite(input.x, 'x');
+  const y = asFinite(input.y, 'y');
+  if (x < 0 || y < 0 || x > 100000 || y > 100000) throw new Error(`${method} needs viewport CSS pixels`);
+  return { method, params: withTrusted(withMotion({ x, y }, input), input) };
+}
+
+function timeoutParam(input: Record<string, unknown>): { timeout: number } {
+  const timeout = input.timeout == null ? DEFAULT_WAIT_TIMEOUT_MS : asInt(input.timeout, 'timeout');
+  if (timeout < 0 || timeout > MAX_WAIT_TIMEOUT_MS) throw new Error('timeout out of range');
+  return { timeout };
 }
 
 function withTrusted(params: Record<string, unknown>, input: Record<string, unknown>): Record<string, unknown> {
