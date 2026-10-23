@@ -12,6 +12,7 @@ export function normalizeCall(
 ): { method: string; params: Record<string, unknown> } {
   const input = raw ?? {};
   switch (method) {
+    case 'timeline':
     case 'list_tabs':
     case 'snapshot':
       return { method, params: {} };

@@ -5,7 +5,7 @@ import { TOOLS } from '../shared/tools.js';
 import { VERSION } from '../shared/protocol.js';
 import type { Hand } from './client.js';
 
-const INSTRUCTIONS = 'Use list_tabs to find the user’s tab, then observe with tabId to select it and inspect current refs. Use includeScreenshot:true for visual work. Act on refs from the latest observation; observe again after navigation, scrolling, or page changes. Verify the expected page result before claiming success. Tool success only confirms delivery. Screenshots are MCP image content plus local file metadata; a client must pass the image to its model. Use one browser controller at a time.';
+const INSTRUCTIONS = 'Use timeline to show operation history and takeover controls. If paused, stop browser calls until the user resumes. Use list_tabs to find the user’s tab, then observe with tabId to select it and inspect current refs. Use includeScreenshot:true for visual work. Act on refs from the latest observation; observe again after navigation, scrolling, or page changes. Verify the expected page result before claiming success. Tool success only confirms delivery. Screenshots are MCP image content plus local file metadata; a client must pass the image to its model. Use one browser controller at a time.';
 
 const SUPPORTED = new Set(['2024-11-05', '2025-03-26', '2025-06-18']);
 

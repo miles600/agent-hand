@@ -10,7 +10,7 @@ import { startBridge } from '../bridge/server.js';
 
 for (const reuse of [false, true]) {
   test(`mcp stdio uses newline JSON and ${reuse ? 'reuses a running bridge' : 'starts its bridge'}`, async () => {
-    const server = reuse ? await startBridge({ port: 0, token: 'mcp-test-token-0123456789' }) : undefined;
+    const server = reuse ? await startBridge({ timeline: false, port: 0, token: 'mcp-test-token-0123456789' }) : undefined;
     const home = await mkdtemp(join(tmpdir(), 'agent-hand-mcp-'));
     const proc = spawn('node', ['dist/bridge/index.js', 'mcp'], {
       cwd: process.cwd(),
@@ -99,7 +99,7 @@ for (const images of [true, false]) {
   test(`MCP screenshots and observe deliver ${images ? 'PNG image content' : 'explicit text-only fallback'}`, async () => {
     const home = await mkdtemp(join(tmpdir(), 'agent-hand-images-'));
     const token = 'mcp-image-test-0123456789';
-    const server = await startBridge({ port: 0, token, screenshotDir: home });
+    const server = await startBridge({ timeline: false, port: 0, token, screenshotDir: home });
     const env = { ...process.env, AGENT_HAND_HOME: home, AGENT_HAND_TOKEN: token, AGENT_HAND_PORT: String(server.port), AGENT_HAND_MCP_IMAGES: images ? '1' : '0' };
     const proc = spawn('node', ['dist/bridge/index.js', 'mcp'], { cwd: process.cwd(), env, stdio: ['pipe', 'pipe', 'pipe'] });
     const reader = new RpcReader(proc);

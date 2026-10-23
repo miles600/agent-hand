@@ -16,6 +16,8 @@ Use the configured Agent Hand tools; client prefixes may differ. This is an exis
 
 ## Recover with fresh evidence
 
+- Use `timeline` to give the user a local operation timeline with screenshots, results, and takeover controls. If a tool reports human takeover, stop browser calls and wait for the user to resume in the timeline. Do not resume through HTTP or other tools. After resume, observe the current page again; cancelled queued actions are never replayed automatically.
+
 - Wrong/missing ref or no visible change: observe again, confirm tab and overlays, then choose a fresh target. Do not repeat a submit/payment/send action when its outcome is uncertain; inspect the current result first.
 - Covered or clipped controls can still appear in a snapshot. Use the screenshot to identify the active dialog or scroll container. Do not click an obscured control just because it has a ref.
 - A `via:synthetic` warning means the event was delivered with DOM events. If trusted input matters, use `requireTrusted:true`; close DevTools if it blocks the debugger, then retry after observation.

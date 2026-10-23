@@ -11,6 +11,14 @@ import { materializeScreenshot } from './screenshot.js';
 import { TRUSTED_INPUT_METHODS } from '../shared/input.js';
 import { sleep } from '../shared/sleep.js';
 import { normalizeCall } from '../shared/validate.js';
+import { Timeline, operationResult, safeUrl, type Operation } from './timeline.js';
+import { TimelineHttp } from './timeline-http.js';
+
+type Job = {
+  entry?: Operation; generation: number; started: boolean; cancelled: boolean;
+  controller: AbortController; timer?: NodeJS.Timeout;
+  resolve: (value: unknown) => void; reject: (error: Error) => void;
+};
 
 type Waiter = {
   resolve: (value: unknown) => void;
@@ -31,6 +39,7 @@ export type BridgeOptions = {
   demoDir?: string;
   screenshotDir?: string;
   authTimeoutMs?: number;
+  timeline?: false | { dir?: string; maxEntries?: number; maxImageBytes?: number };
   /** When true, pointer, typing, and select commands fail instead of synthetic input. */
   requireTrusted?: boolean;
 };
@@ -47,12 +56,33 @@ export async function startBridge(options: BridgeOptions): Promise<BridgeHandle>
   let extension: WebSocket | null = null;
   let extensionId = '';
   const pending = new Map<string, Waiter>();
+  const sent = new Set<string>();
   let chain: Promise<void> = Promise.resolve();
   let direct: DirectSession | null = null;
   let viewport: { cssWidth: number; cssHeight: number; devicePixelRatio: number } | null = null;
   const requireTrusted = options.requireTrusted === true;
+  const timelineOptions = options.timeline === false ? undefined : options.timeline;
+  const timeline = options.timeline === false ? undefined : new Timeline(timelineOptions?.dir ?? join(homeDir(), 'timeline'), timelineOptions?.maxEntries, timelineOptions?.maxImageBytes);
+  const jobs = new Set<Job>();
+  let activeJob: Job | undefined;
+  let generation = 0;
+  let closing = false;
+  let latestSnapshot: { tabId: string | number; items?: { ref: number; name: string }[] } | undefined;
+  const panel = timeline ? new TimelineHttp(timeline, {
+    token, page: fileURLToPath(new URL('../../ui/timeline.html', import.meta.url)), port: addressPort,
+    connection: () => ({ extension: extension?.readyState === WebSocket.OPEN, mode: direct ? 'cdp' : 'extension', inFlight: sent.size }),
+    pause, resume,
+  }) : undefined;
 
   const httpServer = createServer((req, res) => {
+    const path = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
+    if (panel && (path === '/timeline' || path.startsWith('/timeline/'))) {
+      void panel.handle(req, res).catch(error => {
+        if (!res.headersSent) res.writeHead(400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+        res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+      });
+      return;
+    }
     void handleHttp(req, res, {
       demoDir,
       port: addressPort(),
@@ -75,6 +105,8 @@ export async function startBridge(options: BridgeOptions): Promise<BridgeHandle>
       resolve();
     });
   });
+
+  await timeline?.load();
 
   const wss = new WebSocketServer({ server: httpServer, maxPayload: 32 * 1024 * 1024 });
 
@@ -125,7 +157,11 @@ export async function startBridge(options: BridgeOptions): Promise<BridgeHandle>
         clearTimeout(authTimer);
         role = msg.role;
         if (role === 'extension') {
-          if (extension && extension !== socket) extension.close(4000, 'replaced');
+          if (extension && extension !== socket) {
+            extension.close(4000, 'replaced');
+            sent.clear();
+            failPending('extension replaced; inspect the page before retrying');
+          }
           extension = socket;
           extensionId = typeof msg.extensionId === 'string' ? msg.extensionId : '';
           console.error(`extension connected${extensionId ? ` (${extensionId})` : ''}`);
@@ -134,6 +170,7 @@ export async function startBridge(options: BridgeOptions): Promise<BridgeHandle>
               extension = null;
               extensionId = '';
               console.error('extension disconnected');
+              sent.clear();
               failPending('extension disconnected');
             }
           });
@@ -147,6 +184,7 @@ export async function startBridge(options: BridgeOptions): Promise<BridgeHandle>
       }
       if (role === 'extension' && msg.type === 'result') {
         const id = typeof msg.id === 'string' ? msg.id : '';
+        sent.delete(id);
         const waiter = pending.get(id);
         if (!waiter) return;
         clearTimeout(waiter.timer);
@@ -198,20 +236,27 @@ export async function startBridge(options: BridgeOptions): Promise<BridgeHandle>
         reject(new Error(`timed out waiting for the extension (${method})`));
       }, timeoutMs);
       pending.set(id, { resolve, reject, timer });
+      sent.add(id);
       socket.send(JSON.stringify({ type: 'command', id, method, params }));
     });
   }
 
-  async function dispatch(method: string, params: Record<string, unknown>, timeoutMs: number): Promise<unknown> {
+  async function dispatch(method: string, params: Record<string, unknown>, timeoutMs: number, signal?: AbortSignal): Promise<unknown> {
+    signal?.throwIfAborted();
     if (direct && method === 'new_tab') throw new Error('new_tab is only available in Chrome extension mode');
     if (method === 'observe') {
-      if (params.tabId != null) await dispatch('select_tab', { tabId: params.tabId }, timeoutMs);
-      const snapshot = await dispatch('snapshot', {}, timeoutMs);
-      const screenshot = params.includeScreenshot ? await dispatch('screenshot', {}, timeoutMs) : undefined;
+      if (params.tabId != null) await dispatch('select_tab', { tabId: params.tabId }, timeoutMs, signal);
+      const snapshot = await dispatch('snapshot', {}, timeoutMs, signal);
+      const screenshot = params.includeScreenshot ? await dispatch('screenshot', {}, timeoutMs, signal) : undefined;
       return { snapshot, ...(screenshot ? { screenshot } : {}) };
     }
     if (method === 'wait') {
-      await sleep(params.ms as number);
+      if (signal) await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, params.ms as number);
+        const abort = () => { clearTimeout(timer); reject(signal.reason); };
+        signal.addEventListener('abort', abort, { once: true });
+      });
+      else await sleep(params.ms as number);
       return { ms: params.ms };
     }
     if (method === 'attach_cdp') {
@@ -239,7 +284,7 @@ export async function startBridge(options: BridgeOptions): Promise<BridgeHandle>
         noteViewport(saved);
         return saved;
       }
-      noteViewport(data);
+      noteObservation(method, data);
       return data;
     }
     const data = await forward(method, params, timeoutMs);
@@ -248,8 +293,13 @@ export async function startBridge(options: BridgeOptions): Promise<BridgeHandle>
       noteViewport(saved);
       return saved;
     }
-    noteViewport(data);
+    noteObservation(method, data);
     return data;
+  }
+
+  function noteObservation(method: string, data: unknown): void {
+    if (method === 'snapshot' && data && typeof data === 'object') latestSnapshot = data as typeof latestSnapshot;
+    noteViewport(data);
   }
 
   function noteViewport(data: unknown): void {
@@ -262,25 +312,133 @@ export async function startBridge(options: BridgeOptions): Promise<BridgeHandle>
     viewport = { cssWidth, cssHeight, devicePixelRatio };
   }
 
+  function pausedError(): Error {
+    return new Error('Automation paused for human takeover. Wait for the user to resume it in the timeline; do not retry or resume automatically.');
+  }
+
+  function pause(): void {
+    if (!timeline) return;
+    timeline.paused = true;
+    generation += 1;
+    for (const job of jobs) {
+      if (!job.started) cancelJob(job, 'cancelled', pausedError());
+      else job.controller.abort(pausedError());
+    }
+    timeline.changed();
+  }
+
+  function resume(): void {
+    if (!timeline) return;
+    if (activeJob || sent.size > 0) throw new Error('The action already sent is still finishing. Wait before returning control to the agent.');
+    timeline.paused = false;
+    timeline.changed();
+  }
+
+  function cancelJob(job: Job, status: 'cancelled' | 'expired', error: Error): void {
+    if (job.cancelled) return;
+    job.cancelled = true;
+    clearTimeout(job.timer);
+    jobs.delete(job);
+    if (job.entry) timeline?.finish(job.entry, status, error.message);
+    job.reject(error);
+  }
+
+  async function target(timeout: number): Promise<Operation['target']> {
+    const result = await dispatch('list_tabs', {}, timeout) as {
+      targetTabId?: string | number; tabs?: { id: string | number; title?: string; url?: string; active?: boolean }[];
+    };
+    const tab = result.tabs?.find(item => item.id === result.targetTabId) ?? result.tabs?.find(item => item.active);
+    return tab ? { tabId: tab.id, title: (tab.title ?? '').slice(0, 200), url: safeUrl(tab.url ?? '') } : undefined;
+  }
+
+  async function runJob(job: Job, method: string, params: Record<string, unknown>, deadline: number): Promise<void> {
+    if (job.cancelled) return;
+    if (closing || timeline?.paused || job.generation !== generation) { cancelJob(job, 'cancelled', pausedError()); return; }
+    if (Date.now() >= deadline) { cancelJob(job, 'expired', new Error('Request expired while waiting; no browser action was sent.')); return; }
+    clearTimeout(job.timer);
+    job.started = true;
+    activeJob = job;
+    const entry = job.entry;
+    if (entry) { entry.status = 'running'; entry.startedAt = new Date().toISOString(); timeline?.changed(); }
+    const remaining = () => {
+      const ms = deadline - Date.now();
+      if (ms <= 0) throw new Error('Request deadline exceeded; inspect the page before retrying.');
+      return ms;
+    };
+    let data: unknown;
+    let failure: Error | undefined;
+    try {
+      if (entry && method !== 'wait' && method !== 'reload_extension') {
+        entry.target = await target(remaining()).catch(() => undefined);
+        if (latestSnapshot && entry.target?.tabId === latestSnapshot.tabId && typeof params.ref === 'number') {
+          entry.element = latestSnapshot.items?.find(item => item.ref === params.ref)?.name;
+        }
+        timeline?.changed();
+      }
+      data = await dispatch(method, params, remaining(), job.controller.signal);
+      if (entry) entry.result = operationResult(method, data);
+    } catch (error) { failure = error instanceof Error ? error : new Error(String(error)); }
+    try {
+      if (timeline && entry && !closing && !timeline.paused && !job.controller.signal.aborted && Date.now() < deadline) {
+        if (method !== 'wait' && method !== 'reload_extension') entry.target = await target(Math.min(remaining(), 1000)).catch(() => entry.target);
+        const record = data && typeof data === 'object' ? data as Record<string, unknown> : {};
+        const shot = method === 'screenshot' ? data : method === 'observe' ? record.screenshot : undefined;
+        if (shot) await timeline.capture(entry, shot);
+        else if (timeline.captureScreenshots && CAPTURE_METHODS.has(method) && !isTimelineTarget(entry.target?.url, addressPort())) {
+          if (timeline.paused || job.controller.signal.aborted) entry.screenshotError = 'Skipped during human takeover.';
+          else {
+            const captured = await dispatch('screenshot', { out: join(timeline.dir, `${entry.id}.png`) }, Math.min(remaining(), 2000), job.controller.signal);
+            await timeline.capture(entry, captured);
+          }
+        }
+      } else if (entry && CAPTURE_METHODS.has(method)) entry.screenshotError = 'Skipped during takeover, shutdown, or an expired request.';
+    } catch (error) {
+      if (entry) entry.screenshotError = error instanceof Error ? error.message : String(error);
+    } finally {
+      jobs.delete(job);
+      activeJob = undefined;
+      if (entry) timeline?.finish(entry, failure ? closing ? 'interrupted' : failure === job.controller.signal.reason ? 'cancelled' : 'failed' : 'succeeded', failure?.message);
+      if (failure) job.reject(failure); else job.resolve(data);
+    }
+  }
+
   function call(method: string, rawParams?: Record<string, unknown>, timeoutMs?: number): Promise<unknown> {
+    if (method === 'timeline') return panel ? Promise.resolve(panel.issueUrl()) : Promise.reject(new Error('Timeline is disabled.'));
     let normalized: { method: string; params: Record<string, unknown> };
     const raw = { ...(rawParams ?? {}) };
     if (requireTrusted && TRUSTED_INPUT_METHODS.has(method)) raw.requireTrusted = true;
-    try {
-      normalized = normalizeCall(method, raw);
-    } catch (error) {
-      return Promise.reject(error instanceof Error ? error : new Error(String(error)));
+    try { normalized = normalizeCall(method, raw); }
+    catch (error) { return Promise.reject(error instanceof Error ? error : new Error(String(error))); }
+    const entry = timeline?.add(normalized.method, normalized.params);
+    if (closing || timeline?.paused) {
+      if (entry) timeline?.finish(entry, 'cancelled', pausedError().message);
+      return Promise.reject(pausedError());
+    }
+    if (jobs.size >= 50) {
+      if (entry) timeline?.finish(entry, 'failed', 'The operation queue is full.');
+      return Promise.reject(new Error('The operation queue is full.'));
     }
     const timeout = clampTimeout(timeoutMs ?? defaultTimeout(normalized.method, normalized.params));
-    const job = chain.then(() => dispatch(normalized.method, normalized.params, timeout));
-    chain = job.then(
-      () => undefined,
-      () => undefined,
-    );
-    return job;
+    const deadline = Date.now() + timeout;
+    return new Promise((resolve, reject) => {
+      const job: Job = { entry, generation, started: false, cancelled: false, controller: new AbortController(), resolve, reject };
+      job.timer = setTimeout(() => {
+        if (!job.started) cancelJob(job, 'expired', new Error('Request expired while waiting; no browser action was sent.'));
+      }, timeout);
+      jobs.add(job);
+      const work = chain.then(() => runJob(job, normalized.method, normalized.params, deadline));
+      chain = work.catch(error => { jobs.delete(job); clearTimeout(job.timer); reject(error); });
+    });
   }
 
   async function close(): Promise<void> {
+    closing = true;
+    generation += 1;
+    if (activeJob && timeline) timeline.paused = true;
+    for (const job of jobs) {
+      if (!job.started) cancelJob(job, 'cancelled', new Error('Bridge shutting down; queued work was cancelled.'));
+      else job.controller.abort(new Error('Bridge shutting down; inspect the page before retrying.'));
+    }
     clearInterval(pingTimer);
     if (direct) {
       const session = direct;
@@ -288,6 +446,8 @@ export async function startBridge(options: BridgeOptions): Promise<BridgeHandle>
       await session.detach();
     }
     failPending('bridge shutting down');
+    await chain;
+    await timeline?.flush();
     for (const client of wss.clients) client.close(1001, 'bridge shutting down');
     wss.close();
     httpServer.closeAllConnections?.();
@@ -313,6 +473,13 @@ function tokenOk(presented: string, expected: string): boolean {
   const left = createHmac('sha256', key).update(presented).digest();
   const right = createHmac('sha256', key).update(expected).digest();
   return timingSafeEqual(left, right);
+}
+
+const CAPTURE_METHODS = new Set(['click', 'click_xy', 'hover', 'hover_xy', 'dblclick', 'dblclick_xy', 'right_click', 'right_click_xy', 'type', 'clear', 'fill', 'select', 'press', 'scroll', 'navigate', 'new_tab', 'select_tab', 'emulate']);
+
+function isTimelineTarget(value: string | undefined, port: number): boolean {
+  try { const url = new URL(value ?? ''); return ['127.0.0.1', 'localhost'].includes(url.hostname) && url.port === String(port) && url.pathname.startsWith('/timeline'); }
+  catch { return false; }
 }
 
 const DIRECT_METHODS = new Set([
@@ -356,7 +523,7 @@ function defaultTimeout(method: string, params: Record<string, unknown>): number
 
 function clampTimeout(value: number): number {
   if (!Number.isFinite(value)) return 25000;
-  return Math.max(1000, Math.min(120000, Math.floor(value)));
+  return Math.max(1, Math.min(120000, Math.floor(value)));
 }
 
 async function handleHttp(

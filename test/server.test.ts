@@ -20,7 +20,7 @@ test('png header reports pixel size', () => {
 
 test('bridge auth, queue, screenshot file, and demo page', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'agent-hand-server-'));
-  const server = await startBridge({
+  const server = await startBridge({ timeline: false,
     port: 0,
     token: TOKEN,
     demoDir: join(process.cwd(), 'demo'),
@@ -92,7 +92,7 @@ test('bridge auth, queue, screenshot file, and demo page', async () => {
 
 test('observe keeps tab selection, snapshot, and screenshot in one queue job', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'agent-hand-observe-'));
-  const server = await startBridge({ port: 0, token: TOKEN, screenshotDir: dir });
+  const server = await startBridge({ timeline: false, port: 0, token: TOKEN, screenshotDir: dir });
   const extension = await connectExtension(server.port);
   const seen: string[] = [];
   extension.on('message', data => {
@@ -125,7 +125,7 @@ test('observe keeps tab selection, snapshot, and screenshot in one queue job', a
 
 test('a bridge started with requireTrusted forwards it on click', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'agent-hand-server-'));
-  const server = await startBridge({
+  const server = await startBridge({ timeline: false,
     port: 0,
     token: TOKEN,
     demoDir: join(process.cwd(), 'demo'),
@@ -155,9 +155,9 @@ test('a bridge started with requireTrusted forwards it on click', async () => {
 });
 
 test('an occupied bridge port rejects without an unhandled WebSocket server error', async () => {
-  const server = await startBridge({ port: 0, token: TOKEN });
+  const server = await startBridge({ timeline: false, port: 0, token: TOKEN });
   try {
-    await assert.rejects(() => startBridge({ port: server.port, token: TOKEN }), { code: 'EADDRINUSE' });
+    await assert.rejects(() => startBridge({ timeline: false, port: server.port, token: TOKEN }), { code: 'EADDRINUSE' });
     assert.equal((await fetch(`http://127.0.0.1:${server.port}/health`)).ok, true);
   } finally {
     await server.close();
