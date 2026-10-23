@@ -11,7 +11,8 @@ import { materializeScreenshot } from './screenshot.js';
 import { TRUSTED_INPUT_METHODS } from '../shared/input.js';
 import { sleep } from '../shared/sleep.js';
 import { normalizeCall } from '../shared/validate.js';
-import { Timeline, operationResult, safeUrl, type Operation } from './timeline.js';
+import { foregroundChrome } from './foreground.js';
+import { Timeline, operationResult, safeTitle, safeUrl, type Operation } from './timeline.js';
 import { TimelineHttp } from './timeline-http.js';
 
 type Job = {
@@ -243,12 +244,15 @@ export async function startBridge(options: BridgeOptions): Promise<BridgeHandle>
 
   async function dispatch(method: string, params: Record<string, unknown>, timeoutMs: number, signal?: AbortSignal): Promise<unknown> {
     signal?.throwIfAborted();
+    if (direct && params.foreground) throw new Error('Native Chrome foreground activation is only available in extension mode');
     if (direct && method === 'new_tab') throw new Error('new_tab is only available in Chrome extension mode');
     if (method === 'observe') {
-      if (params.tabId != null) await dispatch('select_tab', { tabId: params.tabId }, timeoutMs, signal);
+      const selected = params.tabId != null
+        ? await dispatch('select_tab', { tabId: params.tabId, foreground: params.foreground }, timeoutMs, signal) as { foreground?: unknown }
+        : undefined;
       const snapshot = await dispatch('snapshot', {}, timeoutMs, signal);
       const screenshot = params.includeScreenshot ? await dispatch('screenshot', {}, timeoutMs, signal) : undefined;
-      return { snapshot, ...(screenshot ? { screenshot } : {}) };
+      return { snapshot, ...(screenshot ? { screenshot } : {}), ...(selected?.foreground ? { foreground: selected.foreground } : {}) };
     }
     if (method === 'wait') {
       if (signal) await new Promise<void>((resolve, reject) => {
@@ -288,6 +292,10 @@ export async function startBridge(options: BridgeOptions): Promise<BridgeHandle>
       return data;
     }
     const data = await forward(method, params, timeoutMs);
+    if (method === 'select_tab' && params.foreground) {
+      signal?.throwIfAborted();
+      return { ...(data as Record<string, unknown>), foreground: await foregroundChrome() };
+    }
     if (method === 'screenshot') {
       const saved = await materializeScreenshot(data, { out: typeof params.out === 'string' ? params.out : undefined, dir: screenshotDir });
       noteViewport(saved);
@@ -348,7 +356,7 @@ export async function startBridge(options: BridgeOptions): Promise<BridgeHandle>
       targetTabId?: string | number; tabs?: { id: string | number; title?: string; url?: string; active?: boolean }[];
     };
     const tab = result.tabs?.find(item => item.id === result.targetTabId) ?? result.tabs?.find(item => item.active);
-    return tab ? { tabId: tab.id, title: (tab.title ?? '').slice(0, 200), url: safeUrl(tab.url ?? '') } : undefined;
+    return tab ? { tabId: tab.id, title: safeTitle(tab.title ?? ''), url: safeUrl(tab.url ?? '') } : undefined;
   }
 
   async function runJob(job: Job, method: string, params: Record<string, unknown>, deadline: number): Promise<void> {

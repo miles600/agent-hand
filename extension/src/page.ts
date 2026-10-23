@@ -221,8 +221,15 @@ function collect(): { elements: PageElement[] } {
       add(el, 'clickable');
     }
   }
-  byId = next;
-  return { elements };
+  // A generic pointer container adds no distinct target when its actionable
+  // descendants already have refs. Keep explicit buttons and links intact.
+  const targets = [...next.values()];
+  const actionable = elements.filter((item) => {
+    const el = next.get(item.ahId)!;
+    return item.role !== 'clickable' || !targets.some((child) => child !== el && el.contains(child));
+  });
+  byId = new Map(actionable.map((item) => [item.ahId, next.get(item.ahId)!]));
+  return { elements: actionable };
 }
 
 function prepare(ahId: string): Promise<Box | { error: string }> {

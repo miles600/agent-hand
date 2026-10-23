@@ -76,3 +76,10 @@ test('normalizes the commands an agent sends', () => {
   assert.throws(() => normalizeCall('wait_for_idle', { timeout: 60001 }), /timeout out of range/);
   assert.throws(() => normalizeCall('select', { ref: 1, value: '   ' }), /value is required/);
 });
+
+test('foreground is an explicit boolean and observation needs a target', () => {
+  assert.deepEqual(normalizeCall('select_tab', { tabId: 7, foreground: true }).params, { tabId: 7, foreground: true });
+  assert.deepEqual(normalizeCall('observe', { tabId: 7, foreground: true }).params, { tabId: 7, includeScreenshot: false, foreground: true });
+  assert.throws(() => normalizeCall('select_tab', { tabId: 7, foreground: 'yes' }), /foreground must be a boolean/);
+  assert.throws(() => normalizeCall('observe', { foreground: true }), /foreground requires tabId/);
+});

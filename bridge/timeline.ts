@@ -44,6 +44,10 @@ export class Timeline {
           entry.finishedAt = new Date().toISOString();
           this.paused = true;
         }
+        if (entry.target) {
+          entry.target.title = safeTitle(entry.target.title);
+          entry.target.url = safeUrl(entry.target.url);
+        }
         this.entries.push(entry);
       }
       this.changed();
@@ -159,6 +163,17 @@ export function safeUrl(value: string): string {
     url.hash = '';
     return url.toString();
   } catch { return value.slice(0, 500); }
+}
+
+export function safeTitle(value: string): string {
+  const title = value.trim();
+  // Chrome uses the URL as a temporary title during navigation, sometimes
+  // without its scheme. Treat those headings like URLs, including old records.
+  if (/^https?:\/\/\S+$/i.test(title)) return safeUrl(title).slice(0, 200);
+  if (/^(?:localhost|[\w-]+(?:\.[\w-]+)+)(?::\d+)?[/?#]\S*$/i.test(title)) {
+    return safeUrl(`https://${title}`).replace(/^https:\/\//, '').slice(0, 200);
+  }
+  return title.replace(/https?:\/\/[^\s<>"']+/gi, safeUrl).slice(0, 200);
 }
 
 function safeParams(params: Record<string, unknown>): Record<string, unknown> {

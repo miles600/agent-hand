@@ -22,10 +22,17 @@ export function normalizeCall(
       }
       const params: Record<string, unknown> = { includeScreenshot: input.includeScreenshot === true };
       if (input.tabId != null) params.tabId = asTargetId(input.tabId);
+      if (input.foreground != null) {
+        if (typeof input.foreground !== 'boolean') throw new Error('foreground must be a boolean');
+        if (input.foreground && params.tabId == null) throw new Error('foreground requires tabId');
+        params.foreground = input.foreground;
+      }
       return { method, params };
     }
-    case 'select_tab':
-      return { method, params: { tabId: asTargetId(input.tabId) } };
+    case 'select_tab': {
+      if (input.foreground != null && typeof input.foreground !== 'boolean') throw new Error('foreground must be a boolean');
+      return { method, params: { tabId: asTargetId(input.tabId), ...(input.foreground == null ? {} : { foreground: input.foreground }) } };
+    }
     case 'new_tab':
     case 'navigate':
       return { method, params: { url: asHttpUrl(input.url) } };

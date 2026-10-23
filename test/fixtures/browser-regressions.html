@@ -1,0 +1,38 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Agent Hand browser regressions</title>
+<style>
+body { font: 18px system-ui; margin: 40px; }
+section { margin: 25px 0; }
+button { padding: 12px; }
+.pointer, .pointer * { cursor: pointer; }
+#viewer { position: fixed; inset: 0; background: #222; color: white; }
+#viewer button { position: absolute; right: 25px; top: 25px; }
+#viewer p { margin: 100px; }
+#spacer { height: 2500px; background: linear-gradient(#eef, #fee); }
+</style>
+<main id="main">
+<h1>Browser regression fixture</h1>
+<section class="pointer"><div><button>Star fixture</button><button>Add to fixture list</button></div></section>
+<section class="pointer" role="button" aria-label="Explicit parent"><button>Independent child</button></section>
+<section><button id="open">Open fading viewer</button></section>
+<a href="/destination">Shared navigation text</a>
+<p id="status">Ready</p>
+<div id="spacer">Scroll verification area</div>
+</main>
+<div id="viewer" hidden><button title="Close fading viewer">×</button><p>Fading viewer content</p></div>
+<script>
+const viewer=document.getElementById('viewer'), main=document.getElementById('main');
+document.getElementById('open').onclick=()=>{
+ main.hidden=true; viewer.hidden=false; viewer.style.opacity='0';
+ setTimeout(()=>{viewer.style.opacity='1';}, 350);
+};
+viewer.querySelector('button').onclick=()=>{viewer.hidden=true;main.hidden=false;document.getElementById('status').textContent='Viewer closed';};
+if(location.pathname==='/destination') {
+ document.title='Agent Hand navigation destination';
+ document.querySelector('h1').textContent='Destination loaded';
+ document.getElementById('status').textContent='Navigation succeeded';
+ document.querySelector('a').href='/';
+ document.querySelector('a').textContent='Back to fixture';
+}
+</script>

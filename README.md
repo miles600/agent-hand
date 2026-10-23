@@ -325,3 +325,11 @@ npm run test:e2e
 `npm test` builds the bridge and the extension, then runs the protocol, snapshot, CDP, and MCP checks. `npm run test:e2e` launches Playwright’s Chromium with the unpacked extension, clicks the demo page through the bridge, and checks that only trusted clicks change the counter. Playwright is not attached to the tab: Chrome allows one debugger, and the extension needs it.
 
 The end-to-end test needs a display (`DISPLAY` on Linux). It does not run in headless Chrome, because the cursor has to be on a real window.
+
+### Browser recovery and macOS foreground
+
+For a visible Chrome session on macOS, call `select_tab({tabId, foreground:true})` or `observe({tabId, foreground:true, includeScreenshot:true})`. The result includes `foreground.frontmost`, verified against the macOS foreground application. This is opt-in; ordinary background observation does not activate Chrome at the OS level. Other platforms report unsupported native activation, and CDP/Electron mode rejects this Chrome-specific option.
+
+Empty main-frame snapshots retry for up to 600 ms to allow fading overlays to expose controls. Generic clickable containers are omitted when their descendants already have actionable references. Content-channel transitions retry observations and cursor feedback at most twice; page mutations are never replayed automatically. After a navigation click, wait for the destination URL before checking text shared with the old page.
+
+Timeline URL-derived headings use the same query/fragment/credential redaction as URL lines, including records loaded from earlier versions. Screenshots still contain the visible page.
