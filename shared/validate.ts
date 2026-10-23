@@ -15,8 +15,17 @@ export function normalizeCall(
     case 'list_tabs':
     case 'snapshot':
       return { method, params: {} };
+    case 'observe': {
+      if (input.includeScreenshot != null && typeof input.includeScreenshot !== 'boolean') {
+        throw new Error('includeScreenshot must be a boolean');
+      }
+      const params: Record<string, unknown> = { includeScreenshot: input.includeScreenshot === true };
+      if (input.tabId != null) params.tabId = asTargetId(input.tabId);
+      return { method, params };
+    }
     case 'select_tab':
       return { method, params: { tabId: asTargetId(input.tabId) } };
+    case 'new_tab':
     case 'navigate':
       return { method, params: { url: asHttpUrl(input.url) } };
     case 'click':

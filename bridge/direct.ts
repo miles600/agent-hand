@@ -343,6 +343,7 @@ export class DirectSession {
     }));
     const info = await this.pageInfo();
     return {
+      tabId: this.selectedId,
       text: built.text,
       url: info.href,
       title: info.title,

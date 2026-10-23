@@ -203,6 +203,13 @@ export async function startBridge(options: BridgeOptions): Promise<BridgeHandle>
   }
 
   async function dispatch(method: string, params: Record<string, unknown>, timeoutMs: number): Promise<unknown> {
+    if (direct && method === 'new_tab') throw new Error('new_tab is only available in Chrome extension mode');
+    if (method === 'observe') {
+      if (params.tabId != null) await dispatch('select_tab', { tabId: params.tabId }, timeoutMs);
+      const snapshot = await dispatch('snapshot', {}, timeoutMs);
+      const screenshot = params.includeScreenshot ? await dispatch('screenshot', {}, timeoutMs) : undefined;
+      return { snapshot, ...(screenshot ? { screenshot } : {}) };
+    }
     if (method === 'wait') {
       await sleep(params.ms as number);
       return { ms: params.ms };
@@ -343,7 +350,7 @@ function defaultTimeout(method: string, params: Record<string, unknown>): number
   if (method === 'wait_for_text' || method === 'wait_for_url' || method === 'wait_for_idle') {
     return Number(params.timeout ?? 10000) + 5000;
   }
-  if (method === 'navigate') return 35000;
+  if (method === 'navigate' || method === 'new_tab') return 35000;
   return 25000;
 }
 
@@ -390,6 +397,10 @@ async function handleHttp(
   }
   if (url.pathname === '/demo' || url.pathname === '/demo/') {
     await sendFile(res, join(ctx.demoDir, 'index.html'), 'text/html; charset=utf-8', req.method === 'HEAD');
+    return;
+  }
+  if (url.pathname === '/demo/vision.html') {
+    await sendFile(res, join(ctx.demoDir, 'vision.html'), 'text/html; charset=utf-8', req.method === 'HEAD');
     return;
   }
   if (url.pathname === '/demo/iframe.html') {

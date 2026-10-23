@@ -3,6 +3,12 @@ import test from 'node:test';
 import { normalizeCall } from '../shared/validate.js';
 
 test('normalizes the commands an agent sends', () => {
+  assert.deepEqual(normalizeCall('observe', { tabId: '7', includeScreenshot: true }), {
+    method: 'observe', params: { tabId: 7, includeScreenshot: true },
+  });
+  assert.deepEqual(normalizeCall('observe'), { method: 'observe', params: { includeScreenshot: false } });
+  assert.throws(() => normalizeCall('observe', { includeScreenshot: 'false' }), /must be a boolean/);
+
   assert.deepEqual(normalizeCall('click', { ref: '12', trace: true, duration: 900 }), {
     method: 'click',
     params: { ref: 12, trace: true, duration: 900 },
@@ -13,6 +19,8 @@ test('normalizes the commands an agent sends', () => {
   });
   assert.equal(normalizeCall('navigate', { url: 'http://127.0.0.1:17321/demo' }).params.url, 'http://127.0.0.1:17321/demo');
   assert.throws(() => normalizeCall('navigate', { url: 'javascript:alert(1)' }), /http/);
+  assert.equal(normalizeCall('new_tab', { url: 'https://example.com' }).method, 'new_tab');
+  assert.throws(() => normalizeCall('new_tab', { url: 'file:///tmp/test' }), /http/);
   assert.throws(() => normalizeCall('press', { key: 'Nope' }), /unsupported key/);
   assert.throws(() => normalizeCall('scroll', {}), /direction or a ref/);
   assert.throws(() => normalizeCall('dance', {}), /unknown method/);

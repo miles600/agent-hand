@@ -4,6 +4,9 @@ import test from 'node:test';
 import { resolveCli } from '../bridge/cli.js';
 
 test('parses the commands from the demo script', () => {
+  assert.deepEqual(resolveCli(['observe', '--screenshot']), {
+    kind: 'call', method: 'observe', params: { includeScreenshot: true }, port: undefined, cdp: undefined,
+  });
   assert.deepEqual(resolveCli(['click', '12']), {
     kind: 'call',
     method: 'click',
